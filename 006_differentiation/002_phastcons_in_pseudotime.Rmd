@@ -1,0 +1,135 @@
+---
+title: "Mouse Cerebellum - Cell stats across pseudotime"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(RColorBrewer)
+  library(viridis)
+})
+```
+
+```{r}
+#1. Which lineage is to be processed?
+lineage <- "GC"
+```
+
+```{r}
+pseudotime_bins <- read_tsv(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_pseudotime_stats.txt"))
+
+pseudotime_bins$pseudotime_bin_broad <- cut(x = pseudotime_bins$pseudotime, breaks = seq(0,1, by = 0.05),include.lowest = T, labels = F)
+
+cell_stats <- readRDS("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_cellStats_byPeaks.rds")
+```
+
+```{r}
+cell_stats <- left_join(cell_stats, pseudotime_bins)
+```
+
+```{r, fig.width=5, fig.height=4}
+cell_stats_sum_byPseudo <- filter(cell_stats, is.na(pseudotime)==F) %>%
+  group_by(pseudotime_bin_broad) %>%
+  summarise(
+    phastcons_dist_ci_low=Rmisc::CI(mean_phastcons_dist, ci = 0.95)[3],
+    phastcons_dist_ci_mean=Rmisc::CI(mean_phastcons_dist, ci = 0.95)[2],
+    phastcons_dist_ci_up=Rmisc::CI(mean_phastcons_dist, ci = 0.95)[1],
+    count=n()
+  )
+
+ggplot(filter(cell_stats_sum_byPseudo, count > 20), aes(x=pseudotime_bin_broad, y=phastcons_dist_ci_mean)) +
+  geom_pointrange(aes(ymin=phastcons_dist_ci_low, ymax=phastcons_dist_ci_up), color="#62943c") +
+  geom_line(color="#62943c") +
+  scale_x_continuous(breaks = 1:20) +
+  theme_classic() +
+  ylab("Phastcons vertebrates (distal elements)") +
+  xlab("Pseudotime bins")
+
+cor.test(cell_stats_sum_byPseudo$pseudotime_bin_broad, cell_stats_sum_byPseudo$phastcons_dist_ci_mean)
+```
+
+```{r}
+#1. Which lineage is to be processed?
+lineage <- "PC"
+```
+
+```{r}
+pseudotime_bins <- read_tsv(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_pseudotime_stats.txt"))
+
+pseudotime_bins$pseudotime_bin_broad <- cut(x = pseudotime_bins$pseudotime, breaks = seq(0,1, by = 0.05),include.lowest = T, labels = F)
+
+cell_stats <- readRDS("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_cellStats_byPeaks.rds")
+```
+
+```{r}
+cell_stats <- left_join(cell_stats, pseudotime_bins)
+```
+
+```{r, fig.width=5, fig.height=4}
+cell_stats_sum_byPseudo <- filter(cell_stats, is.na(pseudotime)==F) %>%
+  group_by(pseudotime_bin_broad) %>%
+  summarise(
+    phastcons_dist_ci_low=Rmisc::CI(mean_phastcons_dist, ci = 0.95)[3],
+    phastcons_dist_ci_mean=Rmisc::CI(mean_phastcons_dist, ci = 0.95)[2],
+    phastcons_dist_ci_up=Rmisc::CI(mean_phastcons_dist, ci = 0.95)[1],
+    count=n()
+  )
+
+ggplot(filter(cell_stats_sum_byPseudo, count > 20), aes(x=pseudotime_bin_broad, y=phastcons_dist_ci_mean)) +
+  geom_pointrange(aes(ymin=phastcons_dist_ci_low, ymax=phastcons_dist_ci_up), color="#3b4ea7") +
+  geom_line(color="#3b4ea7") +
+  scale_x_continuous(breaks = 1:20) +
+  theme_classic() +
+  ylab("Phastcons vertebrates (distal elements)") +
+  xlab("Pseudotime bins")
+
+cor.test(cell_stats_sum_byPseudo$pseudotime_bin_broad, cell_stats_sum_byPseudo$phastcons_dist_ci_mean)
+```
+
+```{r}
+#1. Which lineage is to be processed?
+lineage <- "Interneuron"
+```
+
+```{r}
+pseudotime_bins <- read_tsv(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_pseudotime_stats.txt"))
+
+pseudotime_bins$pseudotime_bin_broad <- cut(x = pseudotime_bins$pseudotime, breaks = seq(0,1, by = 0.05),include.lowest = T, labels = F)
+
+cell_stats <- readRDS("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_cellStats_byPeaks.rds")
+```
+
+```{r}
+cell_stats <- left_join(cell_stats, pseudotime_bins)
+```
+
+```{r, fig.width=5, fig.height=4}
+cell_stats_sum_byPseudo <- filter(cell_stats, is.na(pseudotime)==F) %>%
+  group_by(pseudotime_bin_broad) %>%
+  summarise(
+    phastcons_dist_ci_low=Rmisc::CI(mean_phastcons_dist, ci = 0.95)[3],
+    phastcons_dist_ci_mean=Rmisc::CI(mean_phastcons_dist, ci = 0.95)[2],
+    phastcons_dist_ci_up=Rmisc::CI(mean_phastcons_dist, ci = 0.95)[1],
+    count=n()
+  )
+
+ggplot(filter(cell_stats_sum_byPseudo, count > 20), aes(x=pseudotime_bin_broad, y=phastcons_dist_ci_mean)) +
+  geom_pointrange(aes(ymin=phastcons_dist_ci_low, ymax=phastcons_dist_ci_up), color="#d83d2f") +
+  geom_line(color="#d83d2f") +
+  scale_x_continuous(breaks = 1:20) +
+  theme_classic() +
+  ylab("Phastcons vertebrates (distal elements)") +
+  xlab("Pseudotime bins")
+
+cor.test(cell_stats_sum_byPseudo$pseudotime_bin_broad, cell_stats_sum_byPseudo$phastcons_dist_ci_mean)
+```
+
+```{r}
+sessionInfo()
+```
+
+

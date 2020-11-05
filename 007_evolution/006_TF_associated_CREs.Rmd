@@ -1,0 +1,88 @@
+---
+title: "Mouse CREs associated with TFs"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(viridis)
+  library(SummarizedExperiment)
+  library(RColorBrewer)
+})
+```
+
+```{r}
+## Mouse peak info
+mouse_peaks <- read.table("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt", header = T, sep = "\t", stringsAsFactors = F)
+
+## All peak2gene connections
+peak2gene <- read_tsv("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_assignment_to_Genes.txt")
+```
+
+## Number of CREs per gene
+
+Let's proceed by generating stats per gene
+
+```{r}
+gene.stats <- filter(mouse_peaks, robust==T, is.na(put_target_genes)==F) %>%
+  separate_rows(put_target_genes, sep= ",") %>%
+  group_by(put_target_genes) %>%
+  summarise(nPeaks=n_distinct(peak),
+            nDistal=n_distinct(peak[genomic_class_broad %in% c("Distal", "Intronic")]),
+            phastcons_dist=mean(meanPhastCons_100bp[genomic_class_broad %in% c("Distal", "Intronic")]),
+            phastcons_dist_glires=mean(meanPhastCons_Glires_100bp[genomic_class_broad %in% c("Distal", "Intronic")]),
+            minAge_dist=mean(min_age_num[genomic_class_broad %in% c("Distal", "Intronic")]))
+```
+
+We can start with expression stats based on our recent evodevo paper.
+
+```{r}
+mouse_expr <- read_tsv("~/Resources/Cardoso_etal_Nature_2019/Cardoso_etal_Nature_2019_ST3_MouseGenes_expressionStats.txt")
+
+gene.symbols <- read.table("~/Data/scATAC_pipeline_v3/resources/mouse_coding_ens94_gene_symbols.txt", header = T)
+colnames(gene.symbols) <- c("Mouse_ID", "put_target_genes")
+
+gene.stats.expr <- left_join(gene.stats, gene.symbols) %>%
+  right_join(mouse_expr)
+
+gene.stats.expr$nPeaks[is.na(gene.stats.expr$nPeaks)] <- 0
+gene.stats.expr$nDistal[is.na(gene.stats.expr$nDistal)] <- 0
+```
+
+TFs derived from AnimalTFdb3.0
+
+```{r}
+tfs <- read_tsv("~/Resources/Transcription_Factors/Mus_musculus_TF.txt")
+
+tfs <- dplyr::rename(tfs, put_target_genes=Symbol, TF_family=Family)
+gene.stats.expr <- left_join(gene.stats.expr, tfs)
+
+gene.stats.expr$gene_class <- sapply(1:nrow(gene.stats.expr), function(i) {
+  ifelse(is.na(gene.stats.expr$TF_family[i])==F, yes = "TF", no = "other")
+})
+```
+
+```{r, fig.width=3, fig.height=4}
+ggplot(filter(gene.stats.expr, is.na(Cerebellum_pattern)==F), aes(x=is.na(TF_family)==F, y=phastcons_dist, fill=is.na(TF_family)==F))+
+  geom_boxplot(notch = T) +
+  scale_fill_manual(values = c("gray70", "deepskyblue3"), guide=F) +
+  scale_x_discrete(labels=c("Other", "TF"), name=NULL) +
+  ylab("Phastcons vertebrates (mean distal CREs)") +
+  theme_classic()
+
+wilcox.test(gene.stats.expr$phastcons_dist[is.na(gene.stats.expr$Cerebellum_pattern)==F & is.na(gene.stats.expr$TF_family)==F],
+            gene.stats.expr$phastcons_dist[is.na(gene.stats.expr$Cerebellum_pattern)==F & is.na(gene.stats.expr$TF_family)==T])
+
+ggplot(filter(gene.stats.expr, is.na(Cerebellum_pattern)==F), aes(x=is.na(TF_family)==F, y=minAge_dist, fill=is.na(TF_family)==F))+
+  geom_boxplot(notch = T)+
+  scale_fill_manual(values = c("gray70", "deepskyblue3"), guide=F) +
+  scale_x_discrete(labels=c("Other", "TF"), name=NULL) +
+  ylab("Minimum age (mean distal CREs)") +
+  theme_classic()
+
+wilcox.test(gene.stats.expr$minAge_dist[is.na(gene.stats.expr$Cerebellum_pattern)==F & is.na(gene.stats.expr$TF_family)==F],
+            gene.stats.expr$minAge_dist[is.na(gene.stats.expr$Cerebellum_pattern)==F & is.na(gene.stats.expr$TF_family)==T])
+```
+

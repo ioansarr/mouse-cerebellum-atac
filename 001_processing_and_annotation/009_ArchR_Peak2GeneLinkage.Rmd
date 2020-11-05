@@ -1,0 +1,91 @@
+---
+title: "Mouse Cerebellum 009 - Peak to gene linkage"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ArchR)
+  library(tidyverse)
+  library(RColorBrewer)
+  library(viridis)
+  library(ComplexHeatmap)
+})
+```
+
+```{r}
+addArchRThreads(threads = 30) 
+setwd("~/Mouse_Cereb/")
+proj <- loadArchRProject("proj4_chromVar/")
+```
+
+The goal of this analysis is to assign peaks to their associated genes. For this we will use gene activity scores which is a better metric of gene expression than promoter accessibility alone.
+In fact, at least for the genes we have looked at manually (mostly marker genes) gene activity seems to perfectly match gene expression.
+
+Unfortunately, the current version of ArchR doesn't allow us to use gene scores, as it requires to see prediction scores for the integration matrix. For this, we will need to manually add prediction scores of 1 for our Gene score matrix:
+
+```{r}
+ArrowFiles <- getArrowFiles(proj)
+x <- lapply(seq_along(unique(proj$Sample)), function(x){
+  cells_all <- as.character(h5read(ArrowFiles[x],  "GeneScoreMatrix/Info/CellNames"))
+  matchDF <- DataFrame(
+      cellNames = cells_all , 
+      predictionScore = ifelse(paste0(names(ArrowFiles)[x], "#",cells_all) %in% proj$cellNames, yes = 1, no = 0)
+  )
+  rownames(matchDF) <- cells_all
+  h5write(obj = matchDF[cells_all, "predictionScore"], file = ArrowFiles[x], name = "GeneScoreMatrix/Info/predictionScore")
+})
+```
+
+```{r}
+proj <- addPeak2GeneLinks(
+    ArchRProj = proj,
+    reducedDims = "IterativeLSI_finalNucSet", 
+    useMatrix = "GeneScoreMatrix",
+    dimsToUse = 1:ncol(proj@reducedDims$IterativeLSI_finalNucSet$matSVD),
+    scaleDims = F,
+    k = 50,
+    knnIteration = 5000,
+    overlapCutoff = 0.5,
+    maxDist = 250000,
+    seed = 1, 
+    log2Norm = T, 
+    predictionCutoff = 0.5
+)
+```
+
+Getting assignment as a dataframe. Let's be very lenient with our correlation cutoff. We can always filter correlations later.
+Here we are interested in peak to gene linkages, so we should use the maximum resolution (1bp).
+
+```{r}
+p2g_all <- getPeak2GeneLinks(
+    ArchRProj = proj,
+    corCutOff = (-1),
+    FDRCutOff = 1,
+    resolution = 1,
+    returnLoops = FALSE
+)
+
+p2g_0.5 <- getPeak2GeneLinks(
+    ArchRProj = proj,
+    corCutOff = 0.5,
+    FDRCutOff = 0.01,
+    resolution = 1,
+    returnLoops = FALSE
+)
+```
+
+Saving the data
+
+```{r}
+saveRDS(p2g_all, "009_peak2gene/Mouse_Cerebellum_peak2gene_upTo250Kb_all.rds")
+saveRDS(p2g_0.5, "009_peak2gene/Mouse_Cerebellum_peak2gene_upTo250Kb_corrCutOff_0.5.rds")
+saveArchRProject(proj)
+```
+
+```{r}
+sessionInfo()
+```
+

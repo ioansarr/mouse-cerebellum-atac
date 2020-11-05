@@ -1,0 +1,357 @@
+---
+title: "Mouse Cerebellum 002 - Final cell filtering"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ArchR)
+  library(tidyverse)
+  library(RColorBrewer)
+})
+```
+
+We previously identified 1st and 2nd pass putative doublets.
+
+Now we need to decide whether we will also remove clusters that were enriched for doublets/low quality cells.
+
+This decision will be based on the marker genes that define these clusters:
+
+```{r}
+## Working directory. This is where the arrow files will be generated and stored.
+setwd("~/Mouse_Cereb/")
+proj <- loadArchRProject("proj1_init")
+markersGS_clusters_1st_pass <- readRDS("002_doublets/Mou_Cer_1stPass_Cluster_markerGenes.rds")
+markersGS <- getMarkers(markersGS_clusters_1st_pass)
+put_doublets <- readLines("002_doublets/Mou_Cer_additional_put_doublets_Frag45K_DoubEnr4.txt")
+spurious_cells <- readLines("002_doublets/Mou_Cer_cells_in_clustersEnriched_in_putDoublets.txt")
+spurious_clust <- readLines("002_doublets/Mou_Cer_clustersEnriched_in_putDoublets.txt")
+```
+
+```{r, fig.width=8, fig.height=8}
+plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Sample_short", embedding = "UMAP_qc", pal = rev(colorRampPalette(brewer.pal(11, "Spectral"))(22)), rastr = T, labelMeans = F)
+plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Clusters_qc", embedding = "UMAP_qc", rastr = T)
+```
+
+No markers for C21! -> Remove!
+
+Markers for C55
+
+```{r}
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = markersGS[["C55"]]$name[1:30], 
+    embedding = "UMAP_qc",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = NULL
+  )
+
+p
+```
+
+Remove -> doublets and low quality cells
+
+Markers for C5
+
+```{r}
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = markersGS[["C5"]]$name[1:30], 
+    embedding = "UMAP_qc",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = NULL
+  )
+
+p
+```
+
+Remove -> Doublets between astroglia and GCs, interneurons!
+
+Markers for C32
+
+```{r}
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = markersGS[["C32"]]$name[1:30], 
+    embedding = "UMAP_qc",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = NULL
+  )
+
+p
+```
+
+This is more tricky. Let's keep the cluster and only remove the high fragment/ doublet enriched cells.
+
+Markers for C18
+
+```{r}
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = markersGS[["C18"]]$name[1:30], 
+    embedding = "UMAP_qc",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = NULL
+  )
+
+p
+```
+
+Clearly doublets, containing markers from different cell types
+
+Markers for C54
+
+```{r}
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = markersGS[["C54"]]$name[1:30], 
+    embedding = "UMAP_qc",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = NULL
+  )
+
+p
+```
+
+These seem like genuine Purkinje cells. Removing the high fragment - doublet enriched cells should be enough!
+
+Clusters to remove:
+
+```{r}
+clust_rm <- c("C21", "C55", "C5", "C18")
+```
+
+Now we can create a new project with the final set of filtered cells:
+
+```{r}
+subsetArchRProject(proj,
+                   cells = proj$cellNames[!(proj$cellNames %in% c(proj$cellNames[proj$Clusters_qc %in% clust_rm], put_doublets))],
+                   outputDirectory = "proj2_finalCells")
+
+proj <- loadArchRProject("~/Mouse_Cereb/proj2_finalCells/")
+```
+
+Let's also update our barcode stats file:
+
+```{r}
+barcodes_init <- readRDS("001_barcode_qc/Mouse_Cerebellum_barcode_stats.rds")
+barcodes_init$Spurious_clust <- barcodes_init$Clusters_qc %in% spurious_clust
+barcodes_init$Spurious_cell_RM <- barcodes_init$Clusters_qc %in% clust_rm
+barcodes_init$PassQC_all <- barcodes_init$barcode %in% proj$cellNames
+
+saveRDS(barcodes_init, "001_barcode_qc/Mouse_Cerebellum_barcode_stats.rds")
+```
+
+```{r}
+length(proj$cellNames)
+```
+
+Now we can generate some QC stats and plots:
+
+TSS ridge plot
+
+```{r}
+p <- plotGroups(
+    ArchRProj = proj, 
+    groupBy = "Sample_short", 
+    colorBy = "cellColData", 
+    name = "TSSEnrichment",
+    pal = rev(colorRampPalette(brewer.pal(11, "Spectral"))(22)),
+    plotAs = "ridges"
+   ) +
+  ylab("Samples")
+
+p
+
+pdf("Figures/001_QC/TSSenrichment_byLib.pdf", width = 6, height = 6, useDingbats = F); print(p);dev.off()
+```
+
+Fragment size distribution
+
+```{r}
+fragment_sizes <- plotFragmentSizes(ArchRProj = proj, returnDF = T)
+
+head(fragment_sizes)
+dim(fragment_sizes)
+
+fragment_sizes <- as.data.frame(fragment_sizes) %>%
+  dplyr::rename(Sample=sampleName) %>%
+  left_join(unique(dplyr::select(as.data.frame(getCellColData(proj)), Sample, Sample_short)))
+
+p <-ggplot(fragment_sizes, aes(x=fragmentSize, y=fragmentPercent, color=as.factor(Sample_short))) +
+  geom_line() +
+  theme_classic() +
+  xlab("Fragment size") +
+  ylab("Density") +
+  theme(legend.position = "bottom")+
+  scale_color_manual(values = colorRampPalette(brewer.pal(11, "Spectral"))(22), name="Sample")
+
+p
+
+pdf("Figures/001_QC/FragLength_distribution_byLib.pdf", width = 6, height = 6, useDingbats = F); print(p);dev.off()
+
+```
+
+TSS enrichment
+
+```{r}
+tssEnr <- plotTSSEnrichment(ArchRProj = proj, returnDF = T)
+
+head(tssEnr)
+dim(tssEnr)
+
+tssEnr <- as.data.frame(tssEnr) %>%
+  dplyr::rename(Sample=sampleName) %>%
+  left_join(unique(dplyr::select(as.data.frame(getCellColData(proj)), Sample, Sample_short)))
+
+p <-ggplot(tssEnr, aes(x=x, y=smoothValue, color=as.factor(Sample_short))) +
+  geom_line() +
+  theme_classic() +
+  xlab("Distance from TSS (bp)") +
+  ylab("Normalised signal") +
+  theme(legend.position = "bottom")+
+  scale_color_manual(values = colorRampPalette(brewer.pal(11, "Spectral"))(22), name="Sample")
+
+p
+
+pdf("Figures/001_QC/TSS_signal_distribution_byLib.pdf", width = 6, height = 6, useDingbats = F); print(p);dev.off()
+```
+
+Number of cells per library
+
+```{r}
+p <- ggplot(filter(barcodes_init, PassQC_all==T), aes(Timepoint, fill=Sex)) +
+  geom_bar() +
+  coord_flip() +
+  scale_fill_manual(values=c("darkorange", "deepskyblue3", "mediumorchid")) +
+  xlab("Developmental stage") +
+  ylab("Profiled nuclei") +
+  theme_classic()
+
+p
+
+pdf("Figures/001_QC/Nuclei_final_by_Timepoint_and_Lib.pdf", width = 4, height = 4, useDingbats = F); print(p);dev.off()
+```
+
+Now we can rerun our iterative LSI in the final cell set:
+
+```{r}
+proj <- addIterativeLSI(ArchRProj = proj,
+                        useMatrix = "TileMatrix",
+                        name = "IterativeLSI_finalNucSet",
+                        iterations=5,
+                        clusterParams = list(
+                          resolution = c(0.1, 0.2, 0.4, 0.8), 
+                          sampleCells = 20000, 
+                          n.start = 10
+                        ), 
+                        varFeatures = 100000,
+                        dimsToUse = 1:100,
+                        totalFeatures = 500000,
+                        seed = 1,
+                        LSIMethod = 1,
+                        scaleDims = FALSE,
+                        corCutOff = 0.75,
+                        excludeChr = c("chrX", "chrY", "chrMT"),
+                        binarize = T,
+                        force = T)
+```
+
+Adding Clusters. Here we aim for broader cell type characterisation. A resolution of 1.5 seems to work best (we will later have to subcluster within cell types and developmental states).
+
+```{r}
+proj <- addClusters(input = proj,
+                    name = "Clusters_finalNucSet_res1.5",
+                    reducedDims = "IterativeLSI_finalNucSet",
+                    method = "Seurat",
+                    force = T,
+                    resolution=1.5,
+                    corCutOff = 0.75,
+                    scaleDims = FALSE,
+                    seed = 1)
+```
+
+We can also run a UMAP:
+
+```{r}
+proj <- addUMAP(ArchRProj = proj,
+                name = "UMAP_finalNucSet",
+                reducedDims = "IterativeLSI_finalNucSet",
+                minDist = 0.25,
+                metric = "cosine",
+                nNeighbors = 30,
+                force = T,
+                seed = 1,
+                scaleDims = F,
+                corCutOff = 0.75)
+```
+
+```{r, fig.width=8, fig.height=8}
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Sample_short", embedding = "UMAP_finalNucSet", pal = colorRampPalette(brewer.pal(11, "Spectral"))(22), rastr = T, labelMeans = F)
+p2 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Clusters_finalNucSet_res1.5", embedding = "UMAP_finalNucSet", rastr = T)
+
+ggAlignPlots(p1, p2, type = "h")
+```
+
+```{r}
+if (dir.exists("Figures/002_finalNucSet")==F){
+  dir.create("Figures/002_finalNucSet")
+}
+
+pdf("Figures/002_finalNucSet/Mouse_atac_LSI_pass2_tiles_bySample.pdf", width = 8, height = 8, useDingbats = F); print(p1);dev.off()
+
+pdf("Figures/002_finalNucSet/Mouse_atac_LSI_pass2_tiles_byCluster_res1.5.pdf", width = 8, height = 8, useDingbats = F); print(p2);dev.off()
+```
+
+We should save the LSI, UMAP and Cluster information:
+
+```{r}
+if (dir.exists("003_finalNucSet")==F){
+  dir.create("003_finalNucSet")
+}
+
+## UMAP
+saveRDS(getEmbedding(proj, embedding = "UMAP_finalNucSet", returnDF = F), "003_finalNucSet/Mouse_Cereb_finalNucSet_UMAP_merged_tiles.rds")
+
+## LSI
+saveRDS(getReducedDims(proj, reducedDims = "IterativeLSI_finalNucSet", returnMatrix = F), "003_finalNucSet/Mouse_Cereb_finalNucSet_LSI_merged_tiles.rds")
+
+## Clusters and other cell data
+clust <- getCellColData(proj) %>%
+  as.data.frame() %>%
+  rownames_to_column("cellName")
+
+saveRDS(clust, "003_finalNucSet/Mouse_Cereb_finalNucSet_Clusters_merged_tiles_res1.5_and_barcodeStats.rds")
+```
+
+Now, we want to assign cell types to our clusters. For that we will need to identify marker genes.
+
+```{r}
+markersGS_clusters_broad_cell_types <-getMarkerFeatures(proj,
+                  groupBy = "Clusters_finalNucSet_res1.5",
+                  useMatrix = "GeneScoreMatrix", 
+                  threads = 40,
+                  scaleTo = 10^4)
+
+saveRDS(markersGS_clusters_broad_cell_types, "003_finalNucSet/Mouse_Cereb_finalNucSet_Clusters_merged_tiles_res1.5_markerGenes.rds")
+```
+
+We will have to examine these manually in the next section.
+
+Let's save the project for now:
+
+```{r}
+saveArchRProject(proj)
+```
+
+```{r}
+sessionInfo()
+```
+

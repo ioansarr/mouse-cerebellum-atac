@@ -1,0 +1,71 @@
+---
+title: "Mouse Cerebellum 008 - Peak co-accessibility"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ArchR)
+  library(tidyverse)
+  library(RColorBrewer)
+  library(viridis)
+  library(ComplexHeatmap)
+})
+```
+
+First, let's create a copy of our project:
+
+```{r}
+addArchRThreads(threads = 30) 
+setwd("~/Mouse_Cereb/")
+proj <- loadArchRProject("proj4_chromVar/")
+```
+
+Now we can estimate peak co-accessibility through ArchR. This method is similar but not the same with Cicero (doesn't seem to penalise distance, which in this case is advantageous).
+The main purpose of this analysis is to identify co-accessible peaks (not necessarily to link peaks to genes, for which we will take into consideration gene activity scores/imputed RNA-seq expression).
+
+```{r}
+proj <- addCoAccessibility(
+    ArchRProj = proj,
+    reducedDims = "IterativeLSI_finalNucSet", 
+    dimsToUse = 1:ncol(proj@reducedDims$IterativeLSI_finalNucSet$matSVD),
+    scaleDims = F,
+    k = 50,
+    knnIteration = 5000,
+    overlapCutoff = 0.5,
+    maxDist = 1e5,
+    seed = 1, 
+    log2Norm = T
+)
+```
+
+Getting co-accessibility as a dataframe. Let's be very lenient with our correlation cutoff. We can always filter correlations later.
+We are also interested in peak-peak linkages, so we should use the maximum resolution (1bp).
+
+```{r}
+cicero_conns_all <- getCoAccessibility(proj,
+                   corCutOff = (-1),
+                   resolution = 1, 
+                   returnLoops = F)
+
+cicero_conns_0.5 <- getCoAccessibility(proj,
+                   corCutOff = 0.5,
+                   resolution = 1, 
+                   returnLoops = F)
+
+```
+
+Saving the data
+
+```{r}
+saveRDS(cicero_conns_all, "008_cicero/Mouse_Cerebellum_cicero_conns_all.rds")
+saveRDS(cicero_conns_0.5, "008_cicero/Mouse_Cerebellum_cicero_conns_corrCutOff_0.5.rds")
+saveArchRProject(proj)
+```
+
+```{r}
+sessionInfo()
+```
+

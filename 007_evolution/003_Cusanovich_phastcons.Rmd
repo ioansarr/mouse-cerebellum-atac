@@ -1,0 +1,319 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(RColorBrewer)
+```
+
+
+```{r}
+cusanovich.peaks <- read_tsv("~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm10.bed", col_names = c("chr", "start", "end", "peak"))
+cusanovich.data <- readRDS("~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/atac_matrix.binary.qc_filtered.rds")
+cusanovich.data <- cusanovich.data[cusanovich.peaks$peak, ]
+cusanovich_metadata <- read_tsv("~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/cell_metadata.txt")
+
+```
+
+Generating fixed width peaks around the center of each peak (we will use these to calculate conservation scores):
+
+```{r}
+cusanovich.peaks.fixed <- mutate(cusanovich.peaks, width = end - start) %>%
+  mutate(center= start + round(width/2, digits = 0)) %>%
+  mutate(flank_up=center - 250, flank_down = center + 250) %>%
+  select(chr, flank_up, flank_down, peak)
+
+head(cusanovich.peaks.fixed)
+
+summary(cusanovich.peaks.fixed$flank_down - cusanovich.peaks.fixed$flank_up)
+
+## Testing that we didn't get below zero
+min(cusanovich.peaks.fixed$flank_up)
+```
+
+Now we can also export the fixed width peak set:
+
+```{r, eval=FALSE}
+write.table(cusanovich.peaks.fixed, "~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm10_500bp.bed", col.names = F, row.names = F, sep = "\t", quote = F)
+```
+
+Now, we can proceed to estimate conservation scores for the peaks from Cusanovich et al (and respectively calculate conservation scores per cell, and then cell type/tissue).
+
+As with our analysis, we are using phastCons scores to estimate conservation of each peak.
+(http://hgdownload.cse.ucsc.edu/goldenpath/mm10/phastCons60way/mm10.60way.phastCons.bw)
+
+We will use the fixed width peaks to be fair across peaks with variable lengths here:
+
+```{r}
+sliding_window <- function(start, end, step=10, width=100) {
+  start_pos <- seq(from = start, to = end - width, by = step)
+  return(start_pos)
+}
+
+start_pos <- parallel::mclapply(1:nrow(cusanovich.peaks.fixed), function(i) {
+  pos_i <- sliding_window(cusanovich.peaks.fixed$flank_up[i], cusanovich.peaks.fixed$flank_down[i])
+  names(pos_i) <- paste(cusanovich.peaks.fixed$peak[i], 1:length(pos_i), sep = "_")
+  return(drop(pos_i))
+}, mc.cores = 10)
+
+start_pos <- unlist(start_pos)
+
+sliding_windows <- data.frame(window_name=names(start_pos), start=start_pos, end=start_pos + 100, stringsAsFactors = F) %>%
+  mutate(peak=gsub("_[0-9]*$", "", window_name)) %>%
+  left_join(select(cusanovich.peaks.fixed, peak, chr))
+
+sliding_windows <- sliding_windows[, c("chr", "start", "end", "window_name")]
+
+#write_tsv(sliding_windows, "~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm10_500bp_100bpWindows.bed", col_names = F)
+```
+
+Now calculating average phastCons score for each window:
+
+```{bash, eval=FALSE}
+~/Software/utils/bigWigAverageOverBed ~/Mouse_Cereb/006_peaks/001_peak_annotation/phastCons/mm10.60way.phastCons.bw ~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm10_500bp_100bpWindows.bed ~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm10_500bp_100bpWindows_phastCons.txt -minMax
+```
+
+Reading in the scores
+
+```{r}
+phastcons <- read_tsv("~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm10_500bp_100bpWindows_phastCons.txt", col_names = F)
+
+## First let's check the width of the windows
+summary(phastcons$X2)
+
+## The column of interest is X6 (mean0, i.e.counting non-covered bases as 0)
+phastcons_sum <- mutate(phastcons, peak=gsub("_[0-9]*$", "", X1)) %>%
+  group_by(peak) %>%
+  summarise(meanPhastCons_100bp=max(X6), mostCons100bp=X1[which.max(X6)])
+
+ggplot(phastcons_sum, aes(meanPhastCons_100bp))+
+  geom_histogram()
+
+## Getting the info about the most conserved region:
+phastcons_sum <- left_join(phastcons_sum, dplyr::rename(sliding_windows,mostCons100bp=window_name))
+
+phastcons_sum$mostCons100bp <- paste(phastcons_sum$chr, phastcons_sum$start, phastcons_sum$end, sep = "_")
+
+#write_tsv(phastcons_sum, "~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm10_500bp_phastCons_mostConserved100bp.txt",col_names = T)
+
+cusanovich.peaks <- left_join(cusanovich.peaks, select(phastcons_sum, peak, meanPhastCons_100bp, mostCons100bp))
+```
+
+As a next step, we need to classify our peaks based on their genomic class (promoters, gene bodies, distal). This is important so that we can calculate conservation scores limited to only the distal peaks!
+
+We will use the entire peak annotation for this classification:
+
+Intersecting with our gene annotations
+
+```{bash, eval=FALSE}
+bedtools intersect -a ~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm10.bed -b ~/Mouse_Cereb/006_peaks/001_peak_annotation/genes/mouse.genes.ensembl_and_XLOCs.gtf -wa -wb > ~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_genes_ensembl_and_XLOC_overlap.txt
+
+bedtools sort -i ~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm10.bed > ~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm10.sorted.bed
+
+bedtools closest -a ~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm10.sorted.bed -b ~/Mouse_Cereb/006_peaks/001_peak_annotation/genes/mouse.genes.ensembl_and_XLOCs.TSS.bed -d > ~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_ensembl_and_XLOC_closest_TSS.txt
+
+bedtools closest -a ~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm10.sorted.bed -b ~/Mouse_Cereb/006_peaks/001_peak_annotation/genes/mouse.genes.ensembl_coding.TSS.bed -d > ~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_ensembl_coding_closest_TSS.txt
+```
+
+```{r}
+gene.overlaps <- read_tsv("~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_genes_ensembl_and_XLOC_overlap.txt", col_names = F)
+
+gene.overlaps$gene_id <- str_extract(gene.overlaps$X13, "Mou_XLOC_[0-9]*|ENSMUSG[0-9]*")
+gene.overlaps$biotype <- sapply(gene.overlaps$X13, function(x) unlist(strsplit(x, split = ";"))[grepl("gene_biotype", unlist(strsplit(x, split = ";")))])
+gene.overlaps$biotype <- gsub("gene_biotype ", "", gene.overlaps$biotype)
+gene.overlaps$biotype <- gsub('"', '', gene.overlaps$biotype, fixed = T)
+gene.overlaps$biotype <- gsub(' ', '', gene.overlaps$biotype, fixed = T)
+
+genes_overlapping_peaks <- group_by(gene.overlaps, gene_id, biotype) %>% summarise(n_distinct(X4))
+group_by(genes_overlapping_peaks, biotype) %>% count() %>% arrange(desc(n))
+```
+
+We see that most overlaps come from coding genes, different classes of lncRNAs and to some degree pseudogenes. We could thus collapse to the following types: coding, lncRNA, pseudogene, other.
+
+Now let's look into the distance to the closest TSS:
+
+```{r}
+tss.dist <- read_tsv("~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_ensembl_and_XLOC_closest_TSS.txt", col_names = F)
+
+peaks_closest_min_dist <- group_by(tss.dist, X4) %>% summarise(min_dist=min(X9), closest.gene=X8[which.min(X9)])
+
+## Adding the biotype
+annotation <- read_tsv("~/Mouse_Cereb/006_peaks/001_peak_annotation/genes/mouse.genes.ensembl_and_XLOCs.gtf", col_names = F)
+annotation$gene_id <- str_extract(annotation$X9, "Mou_XLOC_[0-9]*|ENSMUSG[0-9]*")
+annotation$biotype <- sapply(annotation$X9, function(x) unlist(strsplit(x, split = ";"))[grepl("gene_biotype", unlist(strsplit(x, split = ";")))])
+annotation$biotype <- gsub("gene_biotype ", "", annotation$biotype)
+annotation$biotype <- gsub('"', '', annotation$biotype, fixed = T)
+annotation$biotype <- gsub(" ", "", annotation$biotype)
+annotation <- select(annotation, gene_id, biotype) %>% unique() %>% dplyr::rename(closest.gene=gene_id, closest.biotype=biotype)
+
+peaks_closest_min_dist <- left_join(peaks_closest_min_dist, annotation)
+
+ggplot(peaks_closest_min_dist, aes(log10(min_dist + 1))) +
+  geom_histogram(bins = 50) +
+  geom_vline(xintercept = 3, color="red", lty="dashed") +
+  theme_bw()
+
+ggplot(filter(peaks_closest_min_dist, closest.biotype %in% c("protein_coding", "lincRNA", "lncRNA", "antisense", "pseudogene", "processed_pseudogene")), aes(log10(min_dist + 1), color=closest.biotype)) +
+  geom_density(alpha = 0) +
+  geom_vline(xintercept = 3, color="red", lty="dashed") +
+  theme_bw()
+
+## Number of promoters (assuming a distance of up to 1000 kb from the TSS)
+sum(peaks_closest_min_dist$min_dist < 1000)
+```
+
+We see that in some cases (ex. pseudogenes) we have a second small peak at around 500 bp. Therefore, to allow for inconsistencies in the TSS definition, we should call distal peaks only those that are more than 1,000 bp away from the TSS.
+
+Collapsing biotypes to more broad categories:
+
+```{r}
+gene.overlaps$ref_biotype <- gene.overlaps$biotype
+gene.overlaps$ref_biotype[gene.overlaps$ref_biotype %in% c("lincRNA", "lncRNA", "antisense")] <- "lncRNA"
+gene.overlaps$ref_biotype[!(gene.overlaps$ref_biotype %in% c("protein_coding", "lncRNA"))] <- "other"
+
+## Number of redundant overlaps:
+table(gene.overlaps$ref_biotype)
+
+## Groupping by peak
+peak_gene_overlaps <- select(gene.overlaps, X4, gene_id, ref_biotype) %>%
+  unique() %>%
+  dplyr::rename(peak=X4) %>%
+  group_by(peak) %>%
+  summarise(overlapping_gene=paste(gene_id, collapse = ","),
+            overlapping_biotype=paste(ref_biotype, collapse = ","),
+            nOverlapping=n()) %>%
+  ungroup()
+
+nrow(peak_gene_overlaps)
+table(peak_gene_overlaps$nOverlapping)
+```
+
+Repeating the same for the closest gene and annotation
+
+```{r}
+annotation$ref_biotype <- annotation$closest.biotype
+annotation$ref_biotype[annotation$ref_biotype %in% c("lincRNA", "lncRNA", "antisense")] <- "lncRNA"
+annotation$ref_biotype[!(annotation$ref_biotype %in% c("protein_coding", "lncRNA"))] <- "other"
+
+## Number of redundant overlaps:
+table(annotation$ref_biotype)
+
+#tss.dist$closest_TSS_pos=paste(tss.dist$X5, tss.dist$X6, sep = "_")
+
+tss.dist <- select(tss.dist, X4, X8, X9) %>%
+  unique() %>%
+  dplyr::rename(peak=X4, closest.gene=X8, closest_TSS_dist=X9) %>%
+  left_join(annotation) %>%
+  group_by(peak) %>%
+  summarise(closest_TSS=paste(closest.gene, collapse = ","),
+            closest_TSS_biotype=paste(ref_biotype, collapse = ","),
+            closest_TSS_dist=unique(closest_TSS_dist),
+            nClosestTSS=n()) %>%
+  ungroup()
+
+## Number of redundant overlaps:
+table(tss.dist$nClosestTSS)
+```
+
+Putting together with the other peak info:
+
+```{r}
+cusanovich.peaks <- left_join(cusanovich.peaks, peak_gene_overlaps)
+cusanovich.peaks <- left_join(cusanovich.peaks, tss.dist)
+```
+
+Now classifying the peaks. We start with the promoter, then classify to exonic (gene body) vs distal:
+
+```{r}
+cusanovich.peaks$genomic_class <- sapply(1:nrow(cusanovich.peaks), function(x) ifelse(cusanovich.peaks$closest_TSS_dist[x] < 1000, yes = ifelse(cusanovich.peaks$nClosestTSS[x]==1, yes = paste(cusanovich.peaks$closest_TSS_biotype[x], "promoter", sep="-"), no = "complex-promoter"), no = ifelse(is.na(cusanovich.peaks$overlapping_gene[x]), yes = "distal", no = ifelse(cusanovich.peaks$nOverlapping[x]==1, yes = paste(cusanovich.peaks$overlapping_biotype[x], "gene_body", sep = "-"), no = "complex-gene_body"))))
+
+table(cusanovich.peaks$genomic_class)
+```
+
+```{r}
+cusanovich.peaks$genomic_class_broad <- str_extract(cusanovich.peaks$genomic_class, "promoter|distal|gene_body")
+
+table(cusanovich.peaks$genomic_class_broad)
+```
+
+Now we can proceed with calculating phastCons scores per cell:
+
+
+```{r}
+## We will split by tissue to reduce the memory load when generating a tidy dataframe
+cell.stats <- Reduce(bind_rows, lapply(unique(cusanovich_metadata$tissue), function(id) {
+  print(paste0("Preparing matrix for: ", id))
+  atac.data <- cusanovich.data[, cusanovich_metadata$cell[cusanovich_metadata$tissue == id]]
+  summ <- summary(atac.data)
+  atac.data.tidy <- data.frame(peak = gsub("-", "_", rownames(atac.data)[summ$i]),
+           cell = colnames(atac.data)[summ$j],
+           count = summ$x, stringsAsFactors = F)
+  atac.data.tidy <- left_join(atac.data.tidy, cusanovich.peaks)
+  print(paste0("Generating stats for: ", id))
+  cell.stats <- group_by(atac.data.tidy, cell) %>%
+  summarise(med_phastcons_all = median(meanPhastCons_100bp),
+            med_phastcons_dist = median(meanPhastCons_100bp[genomic_class_broad=="distal"]),
+            mean_phastcons_all = mean(meanPhastCons_100bp),
+            mean_phastcons_dist = mean(meanPhastCons_100bp[genomic_class_broad=="distal"]),
+            prom=sum(genomic_class_broad=="promoter"),
+            gb=sum(genomic_class_broad=="gene_body"),
+            distal=sum(genomic_class_broad=="distal"),
+            total=n(),
+            count_sum=sum(count))
+  return(cell.stats)
+}))
+```
+
+```{r}
+cell.stats <- left_join(cell.stats, cusanovich_metadata)
+
+cell_label_order_phastcons <- group_by(cell.stats, cell_label) %>%
+  summarise(mean_phastcons_dist=mean(mean_phastcons_dist)) %>%
+  arrange(desc(mean_phastcons_dist))
+
+cell.stats$cell_label <- factor(cell.stats$cell_label, cell_label_order_phastcons$cell_label)
+
+p <- ggplot(filter(cell.stats, cell_label %in% c(cell_label_order_phastcons$cell_label[1:10], c("Microglia", "Regulatory T cells", "B cells", "Macrophages", "T cells", "Alveolar macrophages", "NK", "Dendritic cells", "Monocytes", "Activated B cells", "Immature B cells"))), aes(x=cell_label, y=mean_phastcons_dist, fill=cell_label)) +
+  geom_violin() +
+  geom_boxplot(width=0.1, outlier.alpha = 0) +
+  theme_classic() +
+  scale_fill_manual(values = c("#BD4D90","#C4952D", "#D3405A", "#A191C5", "#619440", "#E2B0D1", "#BDD63E", "#DDD162", "#927C44", "#5978BB", "#4CBC8E", colorRampPalette(rev(brewer.pal(9, "RdPu")[2:7]))(9))) +
+  geom_vline(xintercept = 10.5, color="indianred", lty="dashed") +
+  xlab("Cell type (Cusanovich 2018)") +
+  ylab("Phastcons vertebrates (distal CREs)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust = 0.95), legend.position = "none")
+
+p 
+
+p <- ggplot(filter(cell.stats, cell_label %in% c(cell_label_order_phastcons$cell_label[1:10], c("Microglia", "Regulatory T cells", "B cells", "Macrophages", "T cells", "Alveolar macrophages", "NK", "Dendritic cells", "Monocytes", "Activated B cells", "Immature B cells"))), aes(x=cell_label, y=mean_phastcons_dist, fill=cell_label)) +
+  geom_boxplot(notch = T, outlier.alpha = 0.1) +
+  theme_classic() +
+  scale_fill_manual(values = c("#BD4D90","#C4952D", "#D3405A", "#A191C5", "#619440", "#E2B0D1", "#BDD63E", "#DDD162", "#927C44", "#5978BB", "#4CBC8E", colorRampPalette(rev(brewer.pal(9, "RdPu")[2:7]))(9))) +
+  geom_vline(xintercept = 10.5, color="indianred", lty="dashed") +
+  xlab("Cell type (Cusanovich 2018)") +
+  ylab("Phastcons vertebrates (distal CREs)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust = 0.95), legend.position = "none")
+
+p 
+
+pdf("~/Mouse_Cereb/Figures/008_conservation/Cusanovich_meanPhastcons_byCellType_top10_and_immune_boxplots.pdf", width = 6, height=3.5, useDingbats = F); print(p); dev.off()
+```
+
+```{r}
+wilcox.test(cell.stats$mean_phastcons_dist[cell.stats$cell_label=="Microglia"], cell.stats$mean_phastcons_dist[cell.stats$cell_label=="Macrophages"])
+
+wilcox.test(cell.stats$mean_phastcons_dist[cell.stats$cell_label=="Astrocytes"], cell.stats$mean_phastcons_dist[cell.stats$cell_label=="Podocytes"])
+```
+
+```{r}
+write_tsv(cell.stats, "~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_cell_stats.txt")
+```
+
+```{r}
+sessionInfo()
+```
+
+
+

@@ -1,0 +1,274 @@
+---
+title: "Mouse Cerebellum 012 - Validate with RNA-seq"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(RColorBrewer)
+library(Seurat)
+```
+
+First, we want to see whether our cell type annotation is validated based on the integration with the data from Vladoiu et al. Nature 2019.
+
+```{r}
+atac_anno <- readRDS("~/Mouse_Cereb/004_cellTypes_broad/Mouse_Cerebellum_atac_finalCellType_annotation.rds")
+
+atac_anno$Cell_type <- as.character(atac_anno$Cell_type)
+
+atac_anno$Cell_type[atac_anno$Cell_type=="Progenitor_bipotent" & atac_anno$Timepoint %in% c("e10", "e11", "e12")] <- "Progenitor_anteriorVZ"
+
+atac_anno$Cell_type <- factor(atac_anno$Cell_type, levels = unique(atac_anno$Cell_type))
+
+vladoiu_int <- list.files("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_integration/", pattern = "summary.txt")
+vladoiu_anno <- Reduce(bind_rows,lapply(vladoiu_int, function(x) {
+  anno <- read.table(paste0("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_integration/", x), header = T, sep = "\t", stringsAsFactors = F)
+  anno$Vladoiu_timepoint <- str_split(x, "_", simplify = T)[7]
+  anno$timepoint <- str_split(x, "_", simplify = T)[3]
+  return(anno)
+}))
+```
+
+Comparing annotations (we will only keep cells with annotation in Vladoiu, i.e. e10, e12, e14, e16, e18, P0, P7) and only cells with a prediction score >=0.9
+
+```{r}
+atac_anno_vladoiu <- dplyr::select(atac_anno, cellNames_short, Cell_type, Cell_type_broad, Cell_type_color, Cell_type_broad_color, Timepoint, Lib, Sex) %>%
+  dplyr::rename(cell=cellNames_short) %>%
+  inner_join(dplyr::select(vladoiu_anno,cell, Vladoiu_cell_type, Vladoiu_cell_type_predScore, Vladoiu_timepoint)) %>%
+  filter(is.na(Vladoiu_cell_type)==F,
+         Vladoiu_cell_type_predScore >= 0.9)
+
+nrow(atac_anno_vladoiu)
+```
+
+Now let's look at the overlap between the annotations.
+
+We will calculate a Jaccard index between all possible overlaps. For plotting, we only keep sets showing at least JI >= 0.15 with another set.
+
+```{r, fig.width=8, fig.height=6}
+atac_vlad_original_ji <- Reduce(bind_rows,lapply(unique(atac_anno_vladoiu$Cell_type), function(atac_c) {
+  df <- Reduce(bind_rows,lapply(unique(atac_anno_vladoiu$Vladoiu_cell_type), function(vlad_c) {
+    ji <- sum(atac_anno_vladoiu$Cell_type == atac_c & atac_anno_vladoiu$Vladoiu_cell_type ==vlad_c)/sum(atac_anno_vladoiu$Cell_type == atac_c | atac_anno_vladoiu$Vladoiu_cell_type ==vlad_c)
+    df <- data.frame(Vladoiu_cell_type=vlad_c, JI=ji, stringsAsFactors = F)
+    return(df)
+  }))
+  df$atac_cell_type <- atac_c
+  return(df)
+}))
+
+atac_vlad_original_ji_mat <- spread(atac_vlad_original_ji, key = atac_cell_type, value = JI)
+row.names(atac_vlad_original_ji_mat) <- atac_vlad_original_ji_mat$Vladoiu_cell_type
+atac_vlad_original_ji_mat <- atac_vlad_original_ji_mat[,2:ncol(atac_vlad_original_ji_mat)]
+
+summary(apply(atac_vlad_original_ji_mat, 1, max))
+summary(apply(atac_vlad_original_ji_mat, 2, max))
+
+pheatmap::pheatmap(atac_vlad_original_ji_mat, clustering_method = "ward.D2", color = colorRampPalette((brewer.pal(n = 9, name ="Blues")))(100))
+
+i <- apply(atac_vlad_original_ji_mat, 1, max) >= 0.15
+j <- apply(atac_vlad_original_ji_mat, 2, max) >= 0.15
+
+pheatmap::pheatmap(atac_vlad_original_ji_mat[i,j], clustering_method = "ward.D2", color = colorRampPalette((brewer.pal(n = 9, name ="Blues")))(100))
+
+
+```
+
+```{r, fig.width=8, fig.height=6}
+atac_vlad_original_ji_mat<-atac_vlad_original_ji_mat[i,j]
+
+row.names(atac_vlad_original_ji_mat)
+colnames(atac_vlad_original_ji_mat)
+
+atac_vlad_original_ji_mat <- atac_vlad_original_ji_mat[
+  c("Neural stem cells", "VZ progenitors", "Brainstem progenitors",
+    "Gliogenic progenitors-1", "Gliogenic progenitors-2","Astrocyte/Bergmann glia precursors",
+    "Upper rhombic lip progenitors",
+    "Excitatory cerebellar nuclei neurons",
+    "Post mitotic NTZ neurons",
+    "Postnatal excitatory cerebellar nuclei neurons",
+    "Differentiating Purkinje cells", "Purkinje cells",
+    "GABA interneurons",
+    "Embryonic and postnatal GCPs-1","Unipolar brush cell and GCP progenitor","Unipolar brush cell precursors",
+    "Postnatal GCPs-2",
+    "Unipolar brush cells",
+    "Granule cells",
+    "Oligodendrocyte precursor cells",
+    "Microglia",
+    "Meninges", "Pericytes",
+    "Red blood cells"
+  ),
+  c("Progenitor", "Progenitor_anteriorVZ",   "Progenitor_VZ",
+    "Progenitor_bipotent", "Progenitor_gliogenic", "astroblast_WM", "astroblast_GCL",
+    "Parabrachial_isthmic_diff",
+    "RL_Nb","Isthmic_nuclei", "Glut_DN_V_mature", "Glut_DN_P_mature", "GABA_DN_mature",
+    "PC_diff", "PC_mature",
+    "Interneuron_early",
+    "GCP_prenatal", "GC_diff_prenatal", "UBC_diff",
+    "GCP_postnatal", "GC_diff_P4P7", "GC_mature_P4P7", 
+    "OPC",
+    "Microglia",
+    "Mural/Endothelial",
+    "Erythroid"
+  )
+  ]
+
+pheatmap::pheatmap(atac_vlad_original_ji_mat, cluster_rows = F, cluster_cols = F, color = colorRampPalette((brewer.pal(n = 9, name ="Blues")))(100), lwd=0.8)
+
+pheatmap::pheatmap(atac_vlad_original_ji_mat, cluster_rows = F, cluster_cols = F, color = colorRampPalette((brewer.pal(n = 9, name ="Blues")))(100), lwd=0.8, filename = "~/Mouse_Cereb/Figures/002_finalNucSet/Mouse_atac_CellTypeAnno_withVladoiu_JI.pdf", width = 8, height = 6, cellheight = 10, cellwidth = 10)
+```
+
+Overall, the two annotations agree well. 
+Exceptions: 
+1) Our dif. PCs match brainstem progenitors, which should not be in our dataset given that we only dissected cerebella primordia (vs Vladoiu dissecting entire hindbrain).
+
+2) GABA DN (not annotated in Vladoiu) also match the excitatory neurons. Indeed a small population in the Vlaodiu dataset shows Sox14/Gad2 activity.
+
+```{r}
+gene.symbols <- read_tsv("~/Data/scATAC_pipeline_v3/resources/mouse_coding_ens94_gene_symbols.txt")
+
+table(vladoiu_anno$Vladoiu_timepoint[vladoiu_anno$Vladoiu_cell_type=="Excitatory cerebellar nuclei neurons"])
+
+vladoiu.E14 <- readRDS("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_rna_seurat/Vladoiu_E14_rna_seurat.rds")
+
+DimPlot(vladoiu.E14, cells.highlight = row.names(vladoiu.E14@meta.data)[vladoiu.E14$Vladoiu_cell_type=="Excitatory cerebellar nuclei neurons"])
+
+FeaturePlot(vladoiu.E14, gene.symbols$ensembl[gene.symbols$symbol=="Slc17a6"])
+FeaturePlot(vladoiu.E14, gene.symbols$ensembl[gene.symbols$symbol=="Meis2"])
+FeaturePlot(vladoiu.E14, gene.symbols$ensembl[gene.symbols$symbol=="Gad2"])
+FeaturePlot(vladoiu.E14, gene.symbols$ensembl[gene.symbols$symbol=="Sox14"])
+
+vladoiu.E14.df <- data.frame(UMAP1=vladoiu.E14@reductions$umap@cell.embeddings[,1],
+                            UMAP2=vladoiu.E14@reductions$umap@cell.embeddings[,2],
+                            Cell_type=vladoiu.E14$Vladoiu_cell_type, 
+                            Slc17a6=vladoiu.E14@assays$RNA@counts[gene.symbols$ensembl[gene.symbols$symbol=="Slc17a6"],],
+                            Meis2=vladoiu.E14@assays$RNA@counts[gene.symbols$ensembl[gene.symbols$symbol=="Meis2"],],
+                            Gad2=vladoiu.E14@assays$RNA@counts[gene.symbols$ensembl[gene.symbols$symbol=="Gad2"],],
+                            Sox14=vladoiu.E14@assays$RNA@counts[gene.symbols$ensembl[gene.symbols$symbol=="Sox14"],],
+                            stringsAsFactors = F)
+
+vladoiu.E14.df$Slc17a6 <- vladoiu.E14.df$Slc17a6 /max(vladoiu.E14.df$Slc17a6)
+vladoiu.E14.df$Meis2 <- vladoiu.E14.df$Meis2 /max(vladoiu.E14.df$Meis2)
+vladoiu.E14.df$Gad2 <- vladoiu.E14.df$Gad2 /max(vladoiu.E14.df$Gad2)
+vladoiu.E14.df$Sox14 <- vladoiu.E14.df$Sox14 /max(vladoiu.E14.df$Sox14)
+
+p1 <- ggplot(filter(vladoiu.E14.df, is.na(Cell_type)==F), aes(x=UMAP1, y=UMAP2, color=as.factor(Cell_type=="Excitatory cerebellar nuclei neurons"))) +
+  geom_point(size=0.2, alpha=0.5) +
+  theme_classic() +
+  geom_rect(aes(xmin=4, xmax=19, ymin=-9, ymax=6), alpha=0, color="darkviolet", lwd=0.2, lty="dashed") +
+  scale_color_manual(values = c("gray70", "darkviolet"), guide=F)
+
+p1 
+
+pdf("~/Mouse_Cereb/Figures/002_finalNucSet/Vladoiu_ExcitatoryNeurons_E14.pdf", width = 4, height = 4, useDingbats = F); print(p1); dev.off()
+
+p2 <- ggplot(filter(vladoiu.E14.df, Cell_type=="Excitatory cerebellar nuclei neurons",UMAP1 > 4, UMAP1 < 19, UMAP2 <6, UMAP2 > (-9)), aes(x=UMAP1, y=UMAP2)) +
+  geom_point(aes(alpha=Sox14),size=0.2, color="firebrick1") +
+  geom_point(aes(alpha=Meis2),size=0.2, color="dodgerblue") +
+  geom_point(aes(alpha=Gad2),size=0.2, color="gold2") +
+  annotate("text", label="italic('Sox14')", x=5, y=-5 , color="firebrick1", parse=T, hjust=0) +
+  annotate("text", label="italic('Meis2')", x=5, y=-4 , color="dodgerblue", parse=T, hjust=0) +
+  annotate("text", label="italic('Gad2')", x=5, y=-3 , color="gold2", parse=T, hjust=0) +
+  theme_classic() +
+  theme(legend.position = "none")
+
+
+p2
+
+pdf("~/Mouse_Cereb/Figures/002_finalNucSet/Vladoiu_ExcitatoryNeurons_E14_Sox14_Meis2_Gad2.pdf", width = 3, height = 3, useDingbats = F); print(p2); dev.off()
+```
+
+
+2) A lot of our GCs are annotated as UBCs by Vladoiu. However, reanalysis of the scRNA-seq data revealed intracluster heterogeneity, where only a small fraction of the putative UBCs seems positive for UBC markers (Lmx1a, Eomes), whereas most cells are likely GCPs.
+
+```{r}
+table(vladoiu_anno$Vladoiu_timepoint[vladoiu_anno$Vladoiu_cell_type=="Unipolar brush cells"])
+
+vladoiu.P0 <- readRDS("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_rna_seurat/Vladoiu_P0_rna_seurat.rds")
+
+DimPlot(vladoiu.P0, cells.highlight = row.names(vladoiu.P0@meta.data)[vladoiu.P0$Vladoiu_cell_type=="Unipolar brush cells"])
+
+FeaturePlot(vladoiu.P0, gene.symbols$ensembl[gene.symbols$symbol=="Lmx1a"])
+FeaturePlot(vladoiu.P0, gene.symbols$ensembl[gene.symbols$symbol=="Kcnd2"])
+
+vladoiu.P0.df <- data.frame(UMAP1=vladoiu.P0@reductions$umap@cell.embeddings[,1],
+                            UMAP2=vladoiu.P0@reductions$umap@cell.embeddings[,2],
+                            Cell_type=vladoiu.P0$Vladoiu_cell_type, 
+                            Lmx1a=vladoiu.P0@assays$RNA@counts[gene.symbols$ensembl[gene.symbols$symbol=="Lmx1a"],],
+                            Kcnd2=vladoiu.P0@assays$RNA@counts[gene.symbols$ensembl[gene.symbols$symbol=="Kcnd2"],], stringsAsFactors = F)
+
+vladoiu.P0.df$Lmx1a <- vladoiu.P0.df$Lmx1a /max(vladoiu.P0.df$Lmx1a)
+vladoiu.P0.df$Kcnd2 <- vladoiu.P0.df$Kcnd2 /max(vladoiu.P0.df$Kcnd2)
+
+p1 <- ggplot(filter(vladoiu.P0.df, is.na(Cell_type)==F), aes(x=UMAP1, y=UMAP2, color=as.factor(Cell_type=="Unipolar brush cells"))) +
+  geom_point(size=0.2, alpha=0.5) +
+  theme_classic() +
+  geom_rect(aes(xmin=-3, xmax=7, ymin=-5, ymax=5), alpha=0, color="darkviolet", lwd=0.2, lty="dashed") +
+  scale_color_manual(values = c("gray70", "darkviolet"), guide=F)
+
+p1 
+
+pdf("~/Mouse_Cereb/Figures/002_finalNucSet/Vladoiu_UnipolarBrushCells_P0.pdf", width = 4, height = 4, useDingbats = F); print(p1); dev.off()
+
+p2 <- ggplot(filter(vladoiu.P0.df, Cell_type=="Unipolar brush cells",UMAP1 > (-3), UMAP1 < 7, UMAP2 <5, UMAP2 > (-5)), aes(x=UMAP1, y=UMAP2)) +
+  geom_point(aes(alpha=Lmx1a),size=0.2, color="firebrick1") +
+  geom_point(aes(alpha=Kcnd2),size=0.2, color="dodgerblue") +
+  annotate("text", label="italic('Lmx1a')", x=-2.5, y=-2 , color="firebrick1", parse=T, hjust=0) +
+  annotate("text", label="italic('Kcnd2')", x=-2.5, y=-3 , color="dodgerblue", parse=T, hjust=0) +
+  theme_classic() +
+  theme(legend.position = "none")
+
+
+p2
+
+pdf("~/Mouse_Cereb/Figures/002_finalNucSet/Vladoiu_UnipolarBrushCells_P0_Lmx1a_red_Kcn2_blue.pdf", width = 3, height = 3, useDingbats = F); print(p2); dev.off()
+```
+
+Thus, we can explain very well the inconsistencies in the two annotations.
+
+
+Finally, let's look into the imputed RNA-seq data and how they compare with our gene activity estimates.
+
+```{r}
+vladoiu_cor_f <- list.files("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_integration/", pattern = "acrossClust.txt")
+vladoiu_cor <- Reduce(bind_rows,lapply(vladoiu_cor_f, function(x) {
+  anno <- read.table(paste0("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_integration/", x), header = T, sep = "\t", stringsAsFactors = F)
+  anno$Vladoiu_timepoint <- str_split(x, "_", simplify = T)[7]
+  anno$timepoint <- str_split(x, "_", simplify = T)[3]
+  return(anno)
+}))
+
+vladoiu_cor$timepoint <- factor(vladoiu_cor$timepoint, levels = c("e10", "e12", "e13", "e15", "e17", "P0", "P4", "P7", "P14"))
+
+p <- ggplot(vladoiu_cor, aes(GS_impRNA_corr, color=timepoint)) +
+  geom_density() +
+  scale_color_brewer(palette = "Spectral", name="Stage") +
+  geom_vline(xintercept = median(na.omit(vladoiu_cor$GS_impRNA_corr)), lty="dashed", color="gray50") +
+  xlab("Correlation between gene score and imputed expression (Pearson's r)") +
+  theme_classic()
+
+median(na.omit(vladoiu_cor$GS_impRNA_corr))
+
+p
+
+pdf("~/Mouse_Cereb/Figures/002_finalNucSet/Mouse_Cerebellum_GeneScore_vs_ImputedExpression_HVG_acrossClusters_Vladoiu.pdf", width = 5, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+Prediction scores
+
+```{r}
+vladoiu_pred_f <- list.files("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_integration/", pattern = "summary.txt")
+vladoiu_pred <- unlist(sapply(vladoiu_pred_f, function(x) {
+  anno <- read.table(paste0("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_integration/", x), header = T, sep = "\t", stringsAsFactors = F)
+  x <- as.numeric(anno$Vladoiu_cell_type_predScore)
+  return(x)
+}))
+
+summary(vladoiu_pred)
+```
+
+```{r}
+sessionInfo()
+```
+

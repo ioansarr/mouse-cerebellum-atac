@@ -1,0 +1,356 @@
+---
+title: "Mouse Cerebellum - 003 characterize DA features across pseudotime"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(Mfuzz)
+  library("rGREAT")
+  library(RColorBrewer)
+  library(viridis)
+  library(ComplexHeatmap)
+})
+```
+
+```{r}
+#1. Which lineage is to be processed?
+lineage <- "GC"
+#2. Which marker genes to be plotted?
+interesting_genes <- c("Atoh1", "Barhl1", "Gli2", "Pax3", "Map3k1","Neurod1","Nhlh1","Grin2b", "Cbln3", "Etv1", "Fabp7", "Sox2", "Esrrg", "Junb", "Gabra6", "Rora")
+#3. Optimal number of Mfuzz clusters for peaks: Determined by calculating distance between cluster centroids, visual observation of trajectories, and GO enrichment of each cluster.
+N_peak_clusters <- 7
+```
+
+## Loading data
+
+```{r}
+## Mouse peak info
+mouse_peaks <- read.table("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt", header = T, sep = "\t", stringsAsFactors = F)
+
+pseudotime_bins <- read_tsv(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_pseudotime_stats.txt"))
+
+## Peaks pseudotime bin pseudobulks (cpm)
+peaks_scaled <- read.table(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_pseudotime_bins_peaks_CPM_pseudobulk.txt"), header =  T, sep = "\t", stringsAsFactors = F)
+## Standardising
+peaks_max <- apply(peaks_scaled, 1, max)
+peaks_scaled.std <- peaks_scaled / peaks_max
+
+sig_peaks <- readLines(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_peaks_pseudotime_MMI_significant.txt"))
+```
+
+Clustering significant peaks based on their trajectories. For this we will be using Mfuzz (fuzzy c-means clustering).
+
+```{r}
+## Only considering significant peaks
+peaks_scaled_sig <- peaks_scaled[row.names(peaks_scaled) %in% sig_peaks,]
+
+## Constructing an eset object
+peaks_scaled_sig <- ExpressionSet(as.matrix(peaks_scaled_sig))
+
+## Standardising (essentially substracting the mean and dividing by standard deviation).
+peaks_scaled_sig.s <- standardise(peaks_scaled_sig)
+
+## Need to estimate the fuzzifier paramer m
+m1_peaks <- mestimate(peaks_scaled_sig.s)
+m1_peaks
+
+## So far, looking at the minimum distance between cluster centroids seems to be the best way to optimise the number of clusters.
+set.seed(1)
+c_dmin_peaks <- Dmin(peaks_scaled_sig.s,m1_peaks,crange=seq(4,12,1),repeats = 5)
+```
+
+Now clustering with Mfuzz and plotting the trajectory profiles
+
+```{r, fig.width=8, fig.height=8}
+set.seed(1)
+peaks_clust <- mfuzz(peaks_scaled_sig.s,c=N_peak_clusters,m=m1_peaks)
+
+mfuzz.plot2(peaks_scaled_sig.s, peaks_clust, colo = "fancy", x11 = F, centre = T, mfrow = c(3,3))
+table(peaks_clust$cluster)
+```
+
+We want to rearrange the clusters based on their pseudotemporal order (early to late).
+
+We can simply ask when a cluster reaches its maximum activity, plus also considering the inflexion point to resolve ties.
+
+```{r}
+## When does a cluster reach it's maximum?
+apply(peaks_clust$centers, 1, which.max)
+
+## Resolving ties: When does a cluster get closer to zero? -> proxy for inflexion point
+apply(peaks_clust$centers, 1, function(x) which.min(abs(x)))
+
+clust_order <- data.frame(clust=1:nrow(peaks_clust$centers),
+                          max_activity=apply(peaks_clust$centers, 1, which.max),
+                          inflex=apply(peaks_clust$centers, 1, function(x) which.min(abs(x)))) %>%
+  arrange(max_activity, inflex)
+
+
+clust_order
+```
+
+Visualising on a heatmap
+
+```{r}
+## Counting timepoints abundance per pseudotime bin
+bin_counts <- group_by(pseudotime_bins, pseudotime_bin, timepoint) %>%
+  dplyr::count() %>%
+  spread(key=timepoint, value=n, fill = 0) %>%
+  as.data.frame()
+row.names(bin_counts) <- bin_counts$pseudotime_bin
+bin_counts <- as.matrix(bin_counts[,2:ncol(bin_counts)])
+
+timepoint_cols <- RColorBrewer::brewer.pal(11, "Spectral")
+names(timepoint_cols) <- c("e10", "e11", "e12", "e13", "e15", "e17", "P0", "P04", "P07", "P14", "P63")
+## Mean pseudotime per bin
+pseudotime_mean <- group_by(pseudotime_bins, pseudotime_bin) %>%
+  summarise(pseudotime=mean(pseudotime))
+
+col_fun = circlize::colorRamp2(c(0, 1), c("white", "darkblue"))
+
+ha = HeatmapAnnotation(stage = anno_barplot(bin_counts, gp = gpar(fill = timepoint_cols[colnames(bin_counts)], lwd=0),bar_width = 1, height = unit(1, "cm")),
+                       pseudotime=pseudotime_mean$pseudotime, border = TRUE, col=list(pseudotime=col_fun), show_legend = F)
+```
+
+
+```{r, fig.width=5, fig.height=6}
+if (length(peaks_clust$cluster) > 10000) {
+  set.seed(1)
+  peaks2plot <- sample(names(peaks_clust$cluster), 10000)
+} else {
+  peaks2plot <- names(peaks_clust$cluster)
+}
+
+draw(Heatmap(matrix = peaks_scaled.std[peaks2plot,],
+        row_split =factor(peaks_clust$cluster[peaks2plot], levels = clust_order$clust),
+        top_annotation = ha,
+        cluster_rows = F,
+        cluster_columns = F,
+        show_row_names = F,
+        show_column_names = F,
+        col=viridis(100,option = "A"),
+        cluster_row_slices=T,
+        border = TRUE,
+        heatmap_legend_param = list(direction = "horizontal", title = "Scaled activity")), heatmap_legend_side = "top")
+```
+
+```{r}
+pdf(paste0("~/Mouse_Cereb/Figures/007_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_pseudotime_peak_clusters_heatmap.pdf"), width = 5, height = 6, useDingbats = F);
+draw(Heatmap(matrix = peaks_scaled.std[peaks2plot,],
+        row_split =factor(peaks_clust$cluster[peaks2plot], levels = clust_order$clust),
+        top_annotation = ha,
+        cluster_rows = F,
+        cluster_columns = F,
+        show_row_names = F,
+        show_column_names = F,
+        col=viridis(100,option = "A"),
+        cluster_row_slices=T,
+        border = TRUE,
+        heatmap_legend_param = list(direction = "horizontal", title = "Scaled activity")), heatmap_legend_side = "top");dev.off()
+```
+
+
+Now running GREAT on the peaks in each cluster:
+
+```{r}
+makeBed <- function(peaks) {
+  df <- as.data.frame(do.call(rbind, lapply(peaks, function(p) {
+    return(c(str_split(p, pattern = "-", simplify = T), p))
+  })), stringsAsFactors=F)
+  df[,2] <- as.numeric(df[,2])
+  df[,3] <- as.numeric(df[,3])
+  colnames(df) <- c("chr", "start", "end", "peak")
+  return(df)
+}
+
+bg_all <- makeBed(sig_peaks)
+
+allPeaks_enrichments <- lapply(unique(peaks_clust$cluster), function(clust) {
+  peaks <- makeBed(names(peaks_clust$cluster[peaks_clust$cluster==clust]))
+  print(paste0("Submitting job for cluster ", clust))
+  job <- submitGreatJob(peaks, bg = bg_all, species = "mm10", includeCuratedRegDoms = F, request_interval = 10)
+  tb <- getEnrichmentTables(job, availableOntologies(job))
+  print(paste0("Getting enrichment for cluster ", clust))
+  saveRDS(tb, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_peaks_DA_within_", lineage, "_cluster_", clust, "_GREAT_all.rds"))
+  print(paste0("Done with cluster ", clust))
+  return(tb)
+})
+```
+
+Processing GREAT for BP enrichment
+
+```{r}
+great_bp <- Reduce(bind_rows,lapply(unique(peaks_clust$cluster), function(clust) {
+  tb <- readRDS(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_peaks_DA_within_", lineage, "_cluster_", clust, "_GREAT_all.rds"))
+  bp <- tb[["GO Biological Process"]]
+  bp$lineage_cluster <- clust
+  return(bp)
+}))
+
+great_bp <- arrange(great_bp, lineage_cluster, Hyper_Adjp_BH)
+
+length(unique(great_bp$ID))
+```
+
+```{r, fig.width=8, fig.height=8}
+great_bp_top <- group_by(great_bp, lineage_cluster) %>%
+  top_n(10, -Hyper_Adjp_BH)
+
+length(unique(great_bp_top$ID))
+
+great_bp_plot <- filter(great_bp, ID %in% great_bp_top$ID)
+
+great_bp_plot_spread <- dplyr::select(great_bp_plot, ID, name, Hyper_Adjp_BH, lineage_cluster) %>%
+  spread(key = lineage_cluster, value = Hyper_Adjp_BH)
+
+great_bp_plot_spread[,3:ncol(great_bp_plot_spread)] <- -log10(great_bp_plot_spread[,3:ncol(great_bp_plot_spread)])
+
+## Capping at q99
+great_bp_plot_spread[,3:ncol(great_bp_plot_spread)][great_bp_plot_spread[,3:ncol(great_bp_plot_spread)] > quantile(unlist(great_bp_plot_spread[,3:ncol(great_bp_plot_spread)]), 0.99)] <- quantile(unlist(great_bp_plot_spread[,3:ncol(great_bp_plot_spread)]), 0.99)
+
+row.names(great_bp_plot_spread) <- str_trunc(great_bp_plot_spread$name, width = 60)
+
+pheatmap::pheatmap(great_bp_plot_spread[,3:ncol(great_bp_plot_spread)][,clust_order$clust], cluster_rows = T, cluster_cols = F, color = viridis(100,option = "D"))
+
+pheatmap::pheatmap(great_bp_plot_spread[,3:ncol(great_bp_plot_spread)][,clust_order$clust], cluster_rows = T, cluster_cols = F, color = viridis(100,option = "D"), filename = paste0("~/Mouse_Cereb/Figures/007_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_pseudotime_peak_clusters_GREAT_BP.pdf"), width = 8, height = 8)
+```
+
+Also using HOMER for motif enrichment
+
+```{r, eval=FALSE}
+if(dir.exists(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/bed_files"))==F) {
+  dir.create(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/bed_files"))
+}
+
+lapply(unique(peaks_clust$cluster), function(clust) {
+  peaks <- makeBed(names(peaks_clust$cluster)[peaks_clust$cluster==clust])
+  write.table(peaks, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/bed_files/Mouse_within", lineage, "_lineage_peaks_pseudotime_MfuzzClust_", clust, "_all.bed"), col.names = F, row.names = F, sep = "\t", quote = F)
+})
+
+write.table(makeBed(names(peaks_clust$cluster)), paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/bed_files/Mouse_within", lineage, "_lineage_peaks_pseudotime_MfuzzClust_all_background.bed"), col.names = F, row.names = F, sep = "\t", quote = F)
+```
+
+```{bash, eval=FALSE}
+mkdir ~/Mouse_Cereb/015_withinLineages/GC/homer
+cd ~/Mouse_Cereb/015_withinLineages/GC/bed_files
+
+for i in *MfuzzClust*_all.bed; do
+	name="${i%.*}"
+	nice -n 5 findMotifsGenome.pl $i mm10 ../homer/all/"$name"_Homer/ -bg Mouse_withinGC_lineage_peaks_pseudotime_MfuzzClust_all_background.bed -gc
+ -size given -len 8,10,12&
+done
+
+wait
+```
+
+```{r}
+motif_path <- list.files(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/homer/all/"), pattern = "Mouse_.*Clust.*_all_Homer")
+
+print(motif_path)
+
+motifs <- Reduce(bind_rows,lapply(motif_path, function(p) {
+  motifs <- read_tsv(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/homer/all/", p, "/knownResults.txt"))
+  motifs$lin_clust <- str_split(p, '_', simplify = T)[7]
+  return(motifs)
+}))
+
+motifs <-   mutate(motifs, `Motif Name`= gsub("\\/.*", "", `Motif Name`)) %>%
+  group_by(`Motif Name`, lin_clust) %>%
+  summarise(`Log P-value`=min(`Log P-value`)) %>%
+  ungroup()
+
+## All motifs included in the file are significant!
+
+motifs_spread <- dplyr::select(motifs, `Motif Name`, `Log P-value`, lin_clust) %>%
+  spread(key = lin_clust, value=`Log P-value`)
+
+## Now also identifying the top motif per cluster. We want to label them on the heatmap
+top_motif_by_clust <- unique(apply(motifs_spread[,2:ncol(motifs_spread)], 2, function(x) motifs_spread$`Motif Name`[which.min(x)]))
+
+top_motif_by_clust
+
+## These aren't that informative
+## Let's make our custom list
+
+interesting_motifs <- c("Atoh1(bHLH)", "NeuroD1(bHLH)","NF1(CTF)", "CTCF(Zf)", "CUX1(Homeobox)", "PAX6(Homeobox)", "Meis1(Homeobox)", "Sox2(HMG)", "ZEB1(Zf)", "Snail1(Zf)", "RORgt(NR)", "Mef2d(MADS)", "Jun-AP1(bZIP)", "Gli2(Zf)", "RFX(HTH)", "DLX1(Homeobox)")
+
+## Capping to q99
+motifs_spread[,2:ncol(motifs_spread)] <- motifs_spread[,2:ncol(motifs_spread)] * (-1)
+motifs_spread[,2:ncol(motifs_spread)][motifs_spread[,2:ncol(motifs_spread)] > quantile(unlist(motifs_spread[,2:ncol(motifs_spread)]), 0.99)] <- quantile(unlist(motifs_spread[,2:ncol(motifs_spread)]), 0.99)
+
+sum(apply(motifs_spread[,2:ncol(motifs_spread)], 1, max) > 5)
+
+## Also limiting the analysis in highly significant motifs
+motifs_spread.sig <- motifs_spread[apply(motifs_spread[,2:ncol(motifs_spread)], 1, max) > 5,]
+
+## Annotating with the TF family
+motif_anno <- data.frame(motif=motifs_spread.sig$`Motif Name`, stringsAsFactors = F) %>%
+  mutate(tf_family=gsub("(", "", str_extract(motif, "\\(.*\\)"), fixed = T)) %>%
+   mutate(tf_family=gsub(")", "", tf_family, fixed = T))
+
+row.names(motif_anno) <- motif_anno$motif
+
+## Keeping only prevalent families and setting the rest to other
+top_families <- group_by(motif_anno, tf_family) %>%
+  dplyr::count() %>%
+  arrange(desc(n))
+
+top_families <- top_families$tf_family[1:10]
+
+motif_anno$tf_family[!(motif_anno$tf_family %in% top_families)] <- "Other"
+
+n <- brewer.pal(11, "Set3")
+names(n) <- unique(motif_anno$tf_family)
+```
+
+```{r, fig.width=6, fig.height=6}
+ha = rowAnnotation(foo = anno_mark(at = which(motifs_spread.sig$`Motif Name` %in% interesting_motifs), labels = motifs_spread.sig$`Motif Name`[which(motifs_spread.sig$`Motif Name` %in% interesting_motifs)]), annotation_legend_param = list(direction = "vertical",nrow = 1, labels_gp = gpar(fontsize = 0.1), padding = unit(10, "mm")))
+
+print(draw(Heatmap(matrix = as.matrix(motifs_spread.sig[,2:ncol(motifs_spread)][,clust_order$clust]),
+        cluster_rows = T,
+        cluster_columns = F,
+        show_column_names = T,
+        show_row_names = F,
+        clustering_distance_rows = "pearson",
+        clustering_distance_columns = "pearson",
+        col=viridis(100,option = "E"),
+        border = TRUE,
+        left_annotation = rowAnnotation(tf_family=motif_anno$tf_family, col=list(tf_family=n), border=T, annotation_legend_param = list(direction = "vertical")),
+        right_annotation = ha,
+        heatmap_legend_param = list( title = "-log10 P-val", direction="vertical")), heatmap_legend_side = "right"))
+```
+
+```{r}
+pdf(paste0("~/Mouse_Cereb/Figures/007_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_pseudotime_peak_clusters_HOMER.pdf"), width = 6, height = 6, useDingbats = F);
+draw(Heatmap(matrix = as.matrix(motifs_spread.sig[,2:ncol(motifs_spread)][,clust_order$clust]),
+        cluster_rows = T,
+        cluster_columns = F,
+        show_column_names = T,
+        show_row_names = F,
+        clustering_distance_rows = "pearson",
+        clustering_distance_columns = "pearson",
+        col=viridis(100,option = "E"),
+        border = TRUE,
+        left_annotation = rowAnnotation(tf_family=motif_anno$tf_family, col=list(tf_family=n), border=T, annotation_legend_param = list(direction = "vertical")),
+        right_annotation = ha,
+        heatmap_legend_param = list( title = "-log10 P-val", direction="vertical")), heatmap_legend_side = "right");dev.off()
+```
+
+Export
+
+```{r}
+## Peak clustering optimisation
+write(c_dmin_peaks, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_peaks_Mfuzz_cluster_optimisation_dmin.txt"))
+
+## Peak clustering object
+saveRDS(peaks_clust, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_peaks_Mfuzz_cluster_object.rds"))
+```
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,89 @@
+---
+title: "Mouse Cerebellum 007 - chromVar"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ArchR)
+  library(tidyverse)
+  library(RColorBrewer)
+  library(viridis)
+  library(ComplexHeatmap)
+})
+```
+
+First, let's create a copy of our project:
+
+```{r}
+addArchRThreads(threads = 10) 
+setwd("~/Mouse_Cereb/")
+proj <- loadArchRProject("proj3_peakCalling/")
+```
+
+In this beta version of ArchR there is an issue with adding the peaks to the project.
+
+We therefore need to manually add the peaks and peak matrix:
+
+```{r}
+peaks <- readRDS("006_peaks/Mouse_Cerebellum_reproducible_peaks.rds")
+
+length(peaks)
+
+proj <- addPeakSet(proj, 
+                   peaks,
+                   force = T)
+
+proj <- addPeakMatrix(proj,
+                      ceiling = 5,
+                      binarize = F,
+                      force = T)
+```
+
+Adding motif annotations to our project
+
+```{r}
+proj <- addMotifAnnotations(ArchRProj = proj, motifSet = "cisbp", name = "Motif_cisbp", force = T)
+```
+
+Adding background peaks
+
+```{r}
+proj <- addBgdPeaks(proj, force = T)
+```
+
+Deviations
+
+```{r}
+proj <- addDeviationsMatrix(
+  ArchRProj = proj, 
+  peakAnnotation = "Motif_cisbp",
+  matrixName = "cisBPchromVar",
+  force = TRUE, 
+  threads = 10
+)
+```
+
+Getting the matrix out
+
+```{r}
+getAvailableMatrices(proj)
+
+cisbp <- getMatrixFromProject(proj, useMatrix = "cisBPchromVar")
+
+saveRDS(cisbp, "007_chromvar/Mouse_Cerebellum_chromVar_cisBP_deviations_SE.rds")
+## Both deviations and z-scores are stored
+#assay(cisbp,"z")
+#assay(cisbp,"deviations")
+```
+
+```{r}
+saveArchRProject(proj, "proj4_chromVar", overwrite = T, load = F)
+```
+
+```{r}
+sessionInfo()
+```
+

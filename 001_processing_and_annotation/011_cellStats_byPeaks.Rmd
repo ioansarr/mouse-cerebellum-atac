@@ -1,0 +1,138 @@
+---
+title: "Mouse Cerebellum 011 - Cell stats by peaks"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(RColorBrewer)
+  library(viridis)
+  library(ComplexHeatmap)
+  library(data.table)
+  library(SummarizedExperiment)
+})
+```
+
+Loading our peak matrix and info summary
+
+```{r}
+peak_mat <- readRDS("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peak_matrix_SE_withInfo_robustPeaks.rds")
+
+peak.info <- read.table("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt", header = T, sep = "\t", stringsAsFactors = F)
+```
+
+Per cell in our dataset, we will calculate different summary statistics based on the peaks being used. To improve computational efficiency, we will split across clusters to avoid creating very large matrices:
+
+```{r}
+clust <- sort(unique(peak_mat@colData$Clusters_finalNucSet_res1.5))
+
+cell.stats <- Reduce(bind_rows, lapply(clust, function(id) {
+  print(paste0("Preparing matrix for: ", id))
+  cell_i <- which(peak_mat@colData$Clusters_finalNucSet_res1.5==id)
+  atac.data <- assay(peak_mat[,cell_i])
+  row.names(atac.data) <- peak_mat@elementMetadata$peak
+  summ <- Matrix::summary(atac.data)
+  atac.data.tidy <- data.frame(peak = rownames(atac.data)[summ$i],
+           cell = colnames(atac.data)[summ$j],
+           count = summ$x, stringsAsFactors = F)
+  atac.data.tidy <- left_join(atac.data.tidy, select(peak.info, peak, genomic_class, genomic_class_broad, meanPhastCons_100bp, meanPhastCons_Glires_100bp, min_age_num, repeatOverlap, repeatFraction, GC, multiPeakCRE))
+  print(paste0("Generating stats for: ", id))
+  cell.stats <- group_by(atac.data.tidy, cell) %>%
+  summarise(mean_phastcons_all = mean(meanPhastCons_100bp),
+            mean_phastcons_dist = mean(meanPhastCons_100bp[genomic_class_broad %in% c("Distal", "Intronic")]),
+            mean_phastcons_cod_prom = mean(meanPhastCons_100bp[genomic_class == "protein_coding-Promoter"]),
+            mean_phastcons_lncRNA_prom = mean(meanPhastCons_100bp[genomic_class=="lncRNA-Promoter"]),
+            mean_phastcons_glires_all = mean(meanPhastCons_Glires_100bp),
+            mean_phastcons_glires_dist = mean(meanPhastCons_Glires_100bp[genomic_class_broad %in% c("Distal", "Intronic")]),
+            mean_phastcons_glires_cod_prom = mean(meanPhastCons_Glires_100bp[genomic_class == "protein_coding-Promoter"]),
+            mean_phastcons_glires_lncRNA_prom = mean(meanPhastCons_Glires_100bp[genomic_class=="lncRNA-Promoter"]),
+            mean_repeatFraction_all = mean(repeatFraction),
+            mean_repeatFraction_dist = mean(repeatFraction[genomic_class_broad %in% c("Distal", "Intronic")]),
+            mean_repeatFraction_cod_prom = mean(repeatFraction[genomic_class =="protein_coding-Promoter"]),
+            mean_repeatFraction_lncRNA_prom = mean(repeatFraction[genomic_class=="lncRNA-Promoter"]),
+            mean_Age_all = mean(min_age_num),
+            mean_Age_dist = mean(min_age_num[genomic_class_broad %in% c("Distal", "Intronic")]),
+            mean_Age_cod_prom = mean(min_age_num[genomic_class =="protein_coding-Promoter"]),
+            mean_Age_lncRNA_prom = mean(min_age_num[genomic_class=="lncRNA-Promoter"]),
+            mean_GC_all = mean(GC),
+            mean_GC_dist = mean(GC[genomic_class_broad %in% c("Distal", "Intronic")]),
+            prom=sum(genomic_class_broad=="Promoter"),
+            cod_prom=sum(genomic_class=="protein_coding-Promoter"),
+            lncRNA_prom=sum(genomic_class=="lncRNA-Promoter"),
+            exonic=sum(genomic_class_broad=="Exonic"),
+            intronic=sum(genomic_class_broad=="Intronic"),
+            distal=sum(genomic_class_broad=="Distal"),
+            multiPeakCRE=sum(is.na(multiPeakCRE) == F), 
+            total=n(),
+            count_sum=sum(count))
+  return(cell.stats)
+}))
+
+cell.stats$cod_prom_f <- cell.stats$cod_prom / cell.stats$total
+cell.stats$dist_f <- (cell.stats$distal + cell.stats$intronic) / cell.stats$total
+cell.stats$multiPeakCRE_f <- cell.stats$multiPeakCRE / cell.stats$total
+```
+
+Let's see to what degree the varius measures we estimated are correlated/redundant:
+
+```{r}
+hist(cell.stats$mean_phastcons_all, breaks = 50)
+## With sequencing depth
+cor(cell.stats$mean_phastcons_all, cell.stats$total)
+## With fraction of fragments in coding promoters
+cor(cell.stats$mean_phastcons_all, cell.stats$cod_prom_f)
+## With GC content
+cor(cell.stats$mean_phastcons_all, cell.stats$mean_GC_all)
+## With other measures of conservation
+cor(cell.stats$mean_phastcons_all, cell.stats$mean_phastcons_glires_all)
+cor(cell.stats$mean_phastcons_all, cell.stats$mean_phastcons_dist)
+cor(cell.stats$mean_phastcons_all, cell.stats$mean_phastcons_lncRNA_prom)
+cor(cell.stats$mean_phastcons_all, cell.stats$mean_phastcons_cod_prom)
+
+## With minimum age
+cor(cell.stats$mean_phastcons_all, cell.stats$mean_Age_all)
+
+## With repeats
+cor(cell.stats$mean_phastcons_all, cell.stats$mean_repeatFraction_all)
+
+## With usage of broad peaks
+cor(cell.stats$mean_phastcons_all, cell.stats$multiPeakCRE_f)
+```
+
+Mean phastCons in distal peaks (Distal and intronic)
+
+```{r}
+hist(cell.stats$mean_phastcons_dist, breaks = 50)
+## With sequencing depth
+cor(cell.stats$mean_phastcons_dist, cell.stats$total)
+## With fraction of fragments in coding promoters
+cor(cell.stats$mean_phastcons_dist, cell.stats$cod_prom_f)
+cor(cell.stats$mean_phastcons_dist, cell.stats$dist_f)
+## With GC content
+cor(cell.stats$mean_phastcons_dist, cell.stats$mean_GC_dist)
+
+## With other measures of conservation
+cor(cell.stats$mean_phastcons_dist, cell.stats$mean_phastcons_glires_dist)
+cor(cell.stats$mean_phastcons_dist, cell.stats$mean_phastcons_lncRNA_prom)
+cor(cell.stats$mean_phastcons_dist, cell.stats$mean_phastcons_cod_prom)
+
+cor(cell.stats$mean_phastcons_dist, cell.stats$mean_Age_dist)
+
+cor(cell.stats$mean_phastcons_dist, cell.stats$mean_repeatFraction_dist)
+```
+
+We go with phastcons in distal CREs as our main metric for constraint. That is because it's uncoupled from the fraction of fragments in promoters or exonic regions (compared to using all CREs).
+
+Exporting data
+
+```{r}
+saveRDS(cell.stats, "~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_cellStats_byPeaks.rds")
+```
+
+```{r}
+sessionInfo()
+```
+

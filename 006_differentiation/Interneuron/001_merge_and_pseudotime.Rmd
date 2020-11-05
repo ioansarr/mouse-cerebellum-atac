@@ -1,0 +1,464 @@
+---
+title: "Mouse Cerebellum - 001 merge and call pseudotime"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+## Conda environment and scanpy
+reticulate::use_condaenv("atac", conda = "/home/ioansarr/Software/miniconda3/bin/conda")
+library(reticulate)
+py_config()
+sc <- import("scanpy")
+pd <- import("pandas")
+np <- import("numpy")
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(viridis)
+  library(Seurat)
+  library(harmony)
+  library(SummarizedExperiment)
+  library(Matrix)
+  library(irlba)
+  library(RColorBrewer)
+})
+```
+
+This is a semi-automated script. Several decisions/entries need to be provided manually, after exploring the data!!!
+
+```{r}
+#1. Which lineage is to be processed?
+lineage <- "Interneuron"
+#2. Which marker genes to be plotted?
+interesting_genes <- c("Pax2", "Gad1", "Gad2","Cacna2d3","Nhlh1","Kirrel2", "Robo3", "Calb2", "Cnpy1", "Chrm2", "Fabp7", "Sorcs3","Grm8", "March11", "Pvalb", "Lypd6", "Prkcd", "Klhl1", "Lgi2", "Nxph1", "Cdh22","Ptprk", "Slc6a5", "Htra2", "Grm2", "Sst", "Npas3")
+#3. Minimum number of cells required in each timepoint to consider for the pseudotime
+minCell <- 100
+#4. Filtering of peaks - what fraction of cells in the lineage should show peak activity?
+fCells <- 0.01
+#5. Number of SVD components to be computed
+pca_n <- 20
+#6. Cell to be used as pseudotime root: This comes from the earliest timepoint and from a cluster with the expression of precursor marker genes (Atoh1 for GCs, Kirrel2/Neurog2 for GABAergic cells). However, to ensure the reproducibility of the results and to avoid cases where the random root is suboptimal, we fix the root to a specific cell after exploring a few cases.
+pseudotime_root <- "sa001_Mouse_Cerebellum_e13_F#AGTTACGAGAGCACTG-1"
+#7. Number of bins to use for pseudotime - Too large numbers (ex. 100 bins) will generate noise in terms of sparser data and temporal patterns - Too small numbers (ex. 10 bins) will decrease our resolution to detect transient changes
+N_pseudotime_bins <- 50
+```
+
+## 1. Data loading and preprocessing
+
+Loading in data:
+
+```{r}
+peak_mat <- readRDS("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peak_matrix_SE_withInfo_robustPeaks.rds")
+
+gsm <- readRDS("~/Mouse_Cereb/003_finalNucSet/Mouse_Cereb_finalNucSet_GeneScoreMatrix_SE.rds")
+
+chromvar <- readRDS("~/Mouse_Cereb/007_chromvar/Mouse_Cerebellum_chromVar_cisBP_deviations_SE.rds")
+
+cell_anno <- readRDS("~/Mouse_Cereb/004_cellTypes_broad/Mouse_Cerebellum_atac_finalCellType_annotation.rds")
+```
+
+We will use the standard LSI method from Cusanovich et al. 
+
+```{r}
+idf_norm = function(atac_matrix) {
+  idf_counts = atac_matrix * log(1 + ncol(atac_matrix) / Matrix::rowSums(atac_matrix > 0))
+  return(idf_counts)
+}
+```
+
+Selecting the cells that belong to our lineage of interest:
+
+```{r}
+## Cells in lineage
+cells <- cell_anno$cellNames_short[cell_anno$Cell_type_broad==lineage]
+length(cells)
+
+## Subsetting for timepoints with enough cells
+table(cell_anno$Timepoint[cell_anno$cellNames_short %in% cells])
+
+t <- names(which(table(cell_anno$Timepoint[cell_anno$cellNames_short %in% cells]) >= minCell))
+
+cells <- cell_anno$cell[cell_anno$Cell_type_broad==lineage & cell_anno$Timepoint %in% t]
+length(cells)
+```
+
+LSI and Seurat object generation
+
+```{r}
+## Subset based on cells
+set.seed(1)
+atac.data <- assay(peak_mat[, cells])
+row.names(atac.data) <- peak_mat@elementMetadata$peak
+
+## Requiring peaks to be active in at least a fraction of the cells (see above)
+atac.data.filtered <- atac.data[Matrix::rowSums(atac.data > 0) >= round(fCells * ncol(atac.data)),]
+
+## Dimensions of the filtered and unfiltered dataset
+dim(atac.data)
+dim(atac.data.filtered)
+nrow(atac.data.filtered)/nrow(atac.data)
+
+#Removing the sex chromosomes since we merge replicates from different sexes:
+atac.data.filtered <- atac.data.filtered[grepl("chrX|chrY", row.names(atac.data.filtered))==F, ]
+dim(atac.data.filtered)
+
+## Then we can apply the IDF transformation
+atac.data.idf <- idf_norm(atac.data.filtered)
+
+## Computing the LSI
+svd = irlba(atac.data.idf, nv = pca_n, nu = pca_n, maxit = 1000)
+
+## Checking that we have used enough PCs (still need a few after saturation line to achieve meaningful results)
+plot(svd$d/(sum(svd$d)))
+
+## Weighting LSI based on percentage of variance explained
+d_diag = matrix(0, nrow = pca_n, ncol = pca_n)
+diag(d_diag) <- svd$d
+lsi <- as.matrix(t(d_diag %*% t(svd$v)))
+
+row.names(lsi) = colnames(atac.data.idf)
+colnames(lsi) = paste0("LSI_",1:pca_n)
+
+## Checking for correlation with sequencing depth
+plot(apply(lsi, 2, function(x) cor(x, Matrix::colSums(atac.data.filtered))))
+## The first component correlates with sequencing depth so we should remove it
+
+## Making a Seurat object
+atac.seurat <- CreateSeuratObject(atac.data, assay = "Peaks")
+
+## LSI
+atac.seurat [["lsi"]] <- CreateDimReducObject(embeddings = lsi[,2:ncol(lsi)], stdev = svd$d, key = "lsi_", assay = "Peaks")
+
+atac.seurat <- FindNeighbors(atac.seurat, reduction = "lsi", dims = 1:(pca_n-1))
+atac.seurat <- FindClusters(atac.seurat, resolution = 0.8)
+table(atac.seurat$seurat_clusters)
+
+## Now running UMAP
+atac.seurat <- RunUMAP(atac.seurat, dims = 1:(pca_n-1), min.dist = 0.25, n.neighbors = 30L, reduction = "lsi")
+
+## Adding meta data
+sum(cells==colnames(atac.seurat@assays$Peaks))
+
+atac.seurat$timepoint <- peak_mat[,cells]$Timepoint
+atac.seurat$sex <- peak_mat[,cells]$Sex
+atac.seurat$sample_short <- peak_mat[,cells]$Sample_short
+
+DimPlot(atac.seurat, label = T, pt.size = 0.1)
+DimPlot(atac.seurat, group.by = "timepoint", pt.size = 0.1)
+DimPlot(atac.seurat, group.by = "orig.ident", pt.size = 0.1)
+  
+##Adding gene activity and chromVar data
+gsm_mat <- assay(gsm)
+gsm_mat <- gsm_mat[, row.names(atac.seurat@meta.data)]
+row.names(gsm_mat) <- gsm@elementMetadata$name
+atac.seurat[["GeneScoreScaled"]] <- CreateAssayObject(data = gsm_mat)
+
+chromvar_mat <- assay(chromvar, "deviations")
+chromvar_mat <- chromvar_mat[, row.names(atac.seurat@meta.data)]
+row.names(chromvar_mat) <- chromvar@NAMES
+atac.seurat[["chromVar"]] <- CreateAssayObject(data =chromvar_mat)
+
+rm("atac.data")
+rm("atac.data.filtered")
+rm("atac.data.idf")
+```
+
+## 2. Integrating across stages
+
+Using harmony to merge across replicates and developmental stages.
+
+We use lambda=5 to allow for flexibility across developmental stages.
+
+```{r}
+my_harmony_embeddings <- HarmonyMatrix(atac.seurat@reductions$lsi@cell.embeddings, atac.seurat@meta.data, "orig.ident", do_pca=FALSE, lambda = 5)
+
+colnames(my_harmony_embeddings) <- paste("harmony", 1:length(colnames(my_harmony_embeddings)), sep = "_")
+
+atac.seurat[["harmony"]] <- CreateDimReducObject(my_harmony_embeddings, key = "harmony_", assay = DefaultAssay(atac.seurat))
+```
+
+Clustering and generating a UMAP for the new embedding:
+
+```{r}
+atac.seurat <- FindNeighbors(atac.seurat, reduction = "harmony", dims = 1:ncol(my_harmony_embeddings))
+atac.seurat <- FindClusters(atac.seurat, resolution = 0.8)
+
+atac.seurat@meta.data$clusters_harmony <- atac.seurat@meta.data$seurat_clusters
+
+atac.seurat <- RunUMAP(atac.seurat, reduction = "harmony", dims = 1:ncol(my_harmony_embeddings), reduction.name = "umap_harmony", reduction.key = "umap_harmony_", min.dist = 0.25, n.neighbors = 20L,metric = "cosine", umap.method = "umap-learn")
+
+DimPlot(atac.seurat, label=T, reduction = "umap_harmony", pt.size = 0.1)
+DimPlot(atac.seurat, group.by = "orig.ident", reduction = "umap_harmony", pt.size = 0.1)
+DimPlot(atac.seurat, group.by = "timepoint", reduction = "umap_harmony", pt.size = 0.1)
+DimPlot(atac.seurat, group.by = "sample_short", reduction = "umap_harmony", pt.size = 0.1)
+
+FeaturePlot(atac.seurat, features = "nFeature_Peaks", reduction = "umap_harmony", pt.size = 0.1)
+```
+
+Plotting some genes
+
+```{r}
+plotMarkers_harmony <- function(gene, obj=atac.seurat) {
+  ggplot(NULL, aes(x=obj@reductions$umap_harmony@cell.embeddings[,1],
+                 y=obj@reductions$umap_harmony@cell.embeddings[,2],
+                 col=log10(obj@assays$GeneScoreScaled@data[gene,]))) +
+  geom_point(size=0.1) +
+  scale_colour_viridis_c(na.value = "gray90", option = "magma", direction = 1, name="log10 CPM") +
+  xlab("UMAP1") +
+  ylab("UMAP2") +
+  ggtitle(paste0("GeneScore_", gene))+
+  theme_classic()
+}
+
+lapply(interesting_genes, plotMarkers_harmony)
+```
+
+## 3. Estimating pseudotime
+
+We will use DPT on the harmony-corrected SVD components to approximate differentiation with pseudotime:
+
+```{r}
+## Adding the data and PCs
+adata <- sc$AnnData(X=t(atac.seurat@assays$Peaks@counts[1:10,]), ## We only need some fake data to initialise the object
+                    obsm = list("X_pca"=atac.seurat@reductions$harmony@cell.embeddings)) ## The harmony components are important here
+
+adata$obs['timepoint'] = as.character(atac.seurat$timepoint)
+adata$obs['cluster'] = as.character(atac.seurat$seurat_clusters)
+
+## Compute neighbors (based on the corrected PCs)
+sc$pp$neighbors(adata, n_neighbors=as.integer(20), use_rep = 'X_pca', method='gauss')
+
+## Running a diffusion map 
+sc$tl$diffmap(adata)
+
+## Specifying a cell to be used as root
+## Using the root specified above
+pseudotime_root
+
+## Visualising the root
+DimPlot(atac.seurat, cells.highlight = pseudotime_root, reduction = "umap_harmony")
+
+## Setting the root in the scanpy object (need to account for difference in python indexing!)
+adata$uns['iroot'] = as.integer(which(row.names(atac.seurat@meta.data) == pseudotime_root) - 1)
+
+## Estimating DPT
+sc$tl$dpt(adata, n_branchings=as.integer(0))
+
+## Transferring the pseudotime to the seurat object!
+atac.seurat$pseudotime <- adata$obs$dpt_pseudotime
+```
+
+Exploring the pseudotime assignment:
+
+```{r}
+DimPlot(atac.seurat, group.by = "timepoint")
+FeaturePlot(atac.seurat, features = "pseudotime")+ scale_color_viridis_c()
+
+DimPlot(atac.seurat, reduction = "umap_harmony", group.by = "timepoint")
+FeaturePlot(atac.seurat, reduction = "umap_harmony", features = "pseudotime")+ scale_color_viridis_c()
+
+VlnPlot(atac.seurat, features = "pseudotime", group.by = "timepoint", pt.size = 0)
+
+hist(atac.seurat$pseudotime, breaks = 100)
+```
+
+## Extra: specific for interneurons
+
+We see that after a pseudotime value of ~0.6, we start capturing signal from the subtypes rather than differentiation (ex. the PL interneurons get lower values than the GL and ML interneurons).
+
+Therefore, it makes sense to cap the assignment to 0.6, then rescale from 0 to 1.
+
+```{r}
+atac.seurat$pseudotime_orig <- atac.seurat$pseudotime
+
+hist(atac.seurat$pseudotime, breaks=100)
+abline(v = 0.6, col="red")
+
+atac.seurat$pseudotime[atac.seurat$pseudotime > 0.6] <- 0.6
+atac.seurat$pseudotime <- atac.seurat$pseudotime / max(atac.seurat$pseudotime)
+
+hist(atac.seurat$pseudotime, breaks=100)
+```
+
+## 4. Binning pseudotime and calculating pseudobulks per bin
+
+```{r}
+pseudotime_bins <- data.frame(cell=row.names(atac.seurat@meta.data),
+                              pseudotime=atac.seurat$pseudotime,
+                              timepoint=atac.seurat$timepoint,
+                              orig.ident=atac.seurat$orig.ident,
+                              sample_short=atac.seurat$sample_short,
+                              stringsAsFactors = F) %>%
+  arrange(pseudotime) %>%
+  mutate(pseudotime_bin=cut(x = rank(pseudotime, ties.method = "random"), breaks = N_pseudotime_bins, labels = F)) %>%
+  group_by(pseudotime_bin) %>%
+  mutate(mean_pseudotime=mean(pseudotime))
+
+table(pseudotime_bins$pseudotime_bin)
+
+ggplot(pseudotime_bins, aes(x=pseudotime_bin, y=mean_pseudotime)) +
+  geom_point()
+
+atac.seurat$pseudotime_bin <- sapply(row.names(atac.seurat@meta.data), function(c) pseudotime_bins$pseudotime_bin[pseudotime_bins$cell==c])
+FeaturePlot(atac.seurat, reduction = "umap_harmony", features = "pseudotime_bin") + scale_color_viridis()
+
+VlnPlot(atac.seurat, features = "nCount_Peaks", group.by = "pseudotime_bin", pt.size = 0, log = T) + theme(legend.position = "none")
+VlnPlot(atac.seurat, features = "nCount_Peaks", group.by = "timepoint", pt.size = 0, log = T)
+```
+
+Now we aggregate data across these bins (raw for peaks, scaled for gene activity and chromvar deviations):
+
+```{r}
+genes <- c()
+peaks <- c()
+motifs <- c()
+
+lapply(unique(pseudotime_bins$pseudotime_bin), function(i) {
+  cells <- pseudotime_bins$cell[pseudotime_bins$pseudotime_bin == i]
+  peaks <<- cbind(peaks, Matrix::rowSums(atac.seurat@assays$Peaks@counts[, cells]))
+  genes <<- cbind(genes, Matrix::rowMeans(atac.seurat@assays$GeneScoreScaled@data[, cells]))
+  motifs <<- cbind(motifs, Matrix::rowMeans(atac.seurat@assays$chromVar@data[, cells]))
+  print(paste("Done with bin", i))
+  return(NULL)
+})
+
+dim(genes)
+dim(peaks)
+dim(motifs)
+
+colnames(genes) <- paste0("gs_", unique(pseudotime_bins$pseudotime_bin))
+colnames(peaks) <- paste0("peaks_", unique(pseudotime_bins$pseudotime_bin))
+colnames(motifs) <- paste0("motif_", unique(pseudotime_bins$pseudotime_bin))
+
+row.names(genes) <- row.names(atac.seurat@assays$GeneScoreScaled@data)
+row.names(peaks) <- row.names(atac.seurat@assays$Peaks@counts)
+row.names(motifs) <- row.names(atac.seurat@assays$chromVar@data)
+```
+
+Scaling peaks (CPM)
+
+```{r}
+peaks_scaled <- t(t(peaks)/colSums(peaks)) * 1e6
+```
+
+## 5. Exporting plots
+
+```{r}
+atac.seurat.info <- atac.seurat@meta.data
+atac.seurat.info$cell <- row.names(atac.seurat.info)
+atac.seurat.info$umap1 <- atac.seurat@reductions$umap@cell.embeddings[,1]
+atac.seurat.info$umap2 <- atac.seurat@reductions$umap@cell.embeddings[,2]
+
+atac.seurat.info$umap_harmony_1 <- atac.seurat@reductions$umap_harmony@cell.embeddings[,1]
+atac.seurat.info$umap_harmony_2 <- atac.seurat@reductions$umap_harmony@cell.embeddings[,2]
+
+p <- ggplot(atac.seurat.info, aes(x=umap1, y=umap2, color=timepoint)) +
+  geom_point(size=0.1, alpha=0.5)+
+  scale_color_manual(values = brewer.pal(name = "Spectral", n=length(unique(atac.seurat.info$timepoint)))) +
+  theme_classic() +
+  xlab("UMAP 1") +
+  ylab("UMAP 2")
+
+p
+
+pdf(paste0("~/Mouse_Cereb/Figures/007_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_unaligned_UMAP_byTimepoint.pdf"), width = 6, height = 4, useDingbats = F); print(p); dev.off()
+
+p <- ggplot(atac.seurat.info, aes(x=umap_harmony_1, y=umap_harmony_2, color=timepoint)) +
+  geom_point(size=0.1, alpha=0.5)+
+  scale_color_manual(values = brewer.pal(name = "Spectral", n=length(unique(atac.seurat.info$timepoint)))) +
+  theme_classic() +
+  xlab("UMAP 1") +
+  ylab("UMAP 2")
+
+p
+
+pdf(paste0("~/Mouse_Cereb/Figures/007_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_harmony_aligned_UMAP_byTimepoint.pdf"), width = 6, height = 4, useDingbats = F); print(p); dev.off()
+
+p <- ggplot(atac.seurat.info, aes(x=umap_harmony_1, y=umap_harmony_2, color=pseudotime)) +
+  geom_point(size=0.1, alpha=0.5)+
+  scale_color_viridis() +
+  geom_point(data = filter(atac.seurat.info, cell == pseudotime_root), color="red", size=2) +
+  theme_classic() +
+  xlab("UMAP 1") +
+  ylab("UMAP 2")
+
+p
+
+pdf(paste0("~/Mouse_Cereb/Figures/007_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_harmony_aligned_UMAP_pseudotime.pdf"), width = 6, height = 4, useDingbats = F); print(p); dev.off()
+
+p <- ggplot(atac.seurat.info, aes(x=umap1, y=umap2, color=pseudotime)) +
+  geom_point(size=0.1, alpha=0.5)+
+  scale_color_viridis() +
+  geom_point(data = filter(atac.seurat.info, cell == pseudotime_root), color="red", size=2) +
+  theme_classic() +
+  xlab("UMAP 1") +
+  ylab("UMAP 2")
+
+p
+
+p <- ggplot(atac.seurat.info, aes(x=umap_harmony_1, y=umap_harmony_2, color=pseudotime_orig)) +
+  geom_point(size=0.1, alpha=0.5)+
+  scale_color_viridis() +
+  geom_point(data = filter(atac.seurat.info, cell == pseudotime_root), color="red", size=2) +
+  theme_classic() +
+  xlab("UMAP 1") +
+  ylab("UMAP 2")
+
+p
+
+pdf(paste0("~/Mouse_Cereb/Figures/007_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_harmony_aligned_UMAP_pseudotime_orig.pdf"), width = 6, height = 4, useDingbats = F); print(p); dev.off()
+
+p <- ggplot(atac.seurat.info, aes(x=umap1, y=umap2, color=pseudotime_orig)) +
+  geom_point(size=0.1, alpha=0.5)+
+  scale_color_viridis() +
+  geom_point(data = filter(atac.seurat.info, cell == pseudotime_root), color="red", size=2) +
+  theme_classic() +
+  xlab("UMAP 1") +
+  ylab("UMAP 2")
+
+p
+
+pdf(paste0("~/Mouse_Cereb/Figures/007_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_harmony_unaligned_UMAP_pseudotime_orig.pdf"), width = 6, height = 4, useDingbats = F); print(p); dev.off()
+
+p <- ggplot(atac.seurat.info, aes(x=timepoint, y=pseudotime, fill=timepoint)) +
+  geom_violin()+
+  scale_fill_manual(values = brewer.pal(name = "Spectral", n=length(unique(atac.seurat.info$timepoint)))) +
+  theme_classic() +
+  ylab("Pseudotime")
+
+p
+
+pdf(paste0("~/Mouse_Cereb/Figures/007_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_pseudotime_byTimepoint.pdf"), width = 6, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+
+## 6. Exporting data
+
+```{r}
+## Seurat object
+saveRDS(atac.seurat, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_atac_seurat.rds"))
+
+## Pseudotime stats
+write_tsv(pseudotime_bins, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_pseudotime_stats.txt"))
+
+## Scaled gene score pseudobulk
+write.table(genes, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_pseudotime_bins_geneScoresScaled_pseudobulk.txt"), col.names = T, row.names = T, quote = F, sep = "\t")
+
+## chromVar
+write.table(motifs, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_pseudotime_bins_chromVar_deviations_pseudobulk.txt"), col.names = T, row.names = T, quote = F, sep = "\t")
+
+## Peak pseudotime bin pseudobulks (raw)
+write.table(peaks, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_pseudotime_bins_peaks_pseudobulk.txt"), col.names = T, row.names = T, quote = F, sep = "\t")
+
+## Peak pseudotime bin pseudobulks (cpm)
+write.table(peaks_scaled, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_pseudotime_bins_peaks_CPM_pseudobulk.txt"), col.names = T, row.names = T, quote = F, sep = "\t")
+```
+
+We will continue with the identification of features with significantly differential accessibility across the pseudotime.
+
+```{r}
+sessionInfo()
+```
