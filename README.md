@@ -1,6 +1,6 @@
 # Mouse developing cerebellum snATAC-seq atlas
 
-This repository contains code used in the analysis of the manuscript: "The regulatory landscape of the developing mammalian cerebellum at single-cell resolution".
+This repository contains code used in the analysis of the manuscript: "The regulatory landscape of cells in the developing mammalian cerebellum".
 
 A few terms have been renamed in the final preparation of the manuscript (ms):
 1. The progenitor type referred to as "Uncommitted" in the ms is described as "Progenitor" in the scripts.
