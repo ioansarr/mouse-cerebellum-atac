@@ -1,5 +1,5 @@
 ---
-title: "Mouse Cerebellum - 007 developmental differences in prenatal EGL"
+title: "Mouse Cerebellum - developmental differences in prenatal EGL"
 author: "Ioannis Sarropoulos"
 date: '`r format(Sys.time(), "%d %B, %Y")`'
 output: html_document
@@ -287,7 +287,7 @@ clust_order
 ```{r}
 peak_stats$temp_clust <- factor(peak_stats$temp_clust, levels=clust_order$clust)
 
-ggplot(filter(peak_stats,genomic_class_broad %in% c("Distal", "Intronic"), is.na(temp_clust)==F), aes(x=temp_clust, y=meanPhastCons_100bp, fill=temp_clust)) +
+ggplot(filter(peak_stats,genomic_class_broad %in% c("Distal"), is.na(temp_clust)==F), aes(x=temp_clust, y=meanPhastCons_100bp, fill=temp_clust)) +
   geom_boxplot(notch = T) +
   scale_fill_manual(values = c("indianred","deepskyblue3"), name="Temporal cluster") +
   scale_x_discrete(labels=c("down", "up")) +
@@ -295,7 +295,7 @@ ggplot(filter(peak_stats,genomic_class_broad %in% c("Distal", "Intronic"), is.na
   xlab("DA direction") +
   theme_classic()
 
-ggplot(filter(peak_stats,genomic_class_broad %in% c("Distal", "Intronic"), is.na(temp_clust)==F), aes(temp_clust,  fill=as.factor(min_age_num)))+
+ggplot(filter(peak_stats,genomic_class_broad %in% c("Distal"), is.na(temp_clust)==F), aes(temp_clust,  fill=as.factor(min_age_num)))+
   geom_bar(position = "fill") +
   scale_x_discrete(labels=c("down", "up")) +
   ylab("Fraction") +

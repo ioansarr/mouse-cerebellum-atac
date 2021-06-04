@@ -236,9 +236,9 @@ proj_merged$Cell_type[proj_merged$cellNames %in% c(
   proj_P14$cellNames[proj_P14$Clusters_within_P14=="C12"]
 )] <- "Other/mixture"
 
-proj_merged$Cell_type[proj_merged$Cell_type=="Mixture_early_nuclei"] <- "Other/mixture"
-proj_merged$Cell_type[proj_merged$Cell_type=="Other"] <- "Other/mixture"
-proj_merged$Cell_type[proj_merged$Cell_type=="Other"] <- "Other/mixture"
+proj_merged$Cell_type[proj_merged$Cell_type=="Mixture_early_nuclei"] <- "Low_quality"
+proj_merged$Cell_type[proj_merged$Cell_type=="Other"] <- "Low_quality"
+proj_merged$Cell_type[proj_merged$Cell_type=="Other"] <- "Low_quality"
 ```
 
 ```{r, fig.width=12,fig.height=12}

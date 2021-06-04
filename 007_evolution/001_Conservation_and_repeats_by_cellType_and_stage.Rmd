@@ -15,68 +15,43 @@ suppressPackageStartupMessages({
 ```
 
 ```{r}
-cell_anno <- readRDS("~/Mouse_Cereb/004_cellTypes_broad/Mouse_Cerebellum_atac_finalCellType_annotation.rds")
+cell.anno <- readRDS("~/Mouse_Cereb/004_cellTypes_broad/Mouse_Cerebellum_atac_finalCellType_annotation.rds")
 
-cell.stats <- readRDS("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_cellStats_byPeaks.rds")
-
-cell.stats <- left_join(cell_anno, cell.stats)
+cell.stats <- left_join(cell.anno, cell.stats)
 ```
+
 
 ```{r}
 cell_lineage_stats <- filter(cell.stats, !Cell_type_broad %in% c("Parabrachial+Isthmic_nuclei", "Glut_DN+Isthmic_nuclei", "Other")) %>%
-  group_by(Cell_type_broad, Cell_type_broad_color, Timepoint) %>%
+  group_by(Cell_type_broad, Cell_type_broad_color, Timepoint, Lib) %>%
   summarise(
     ## Phastons in distal CREs (vertebrates)
-    phastcons_dist_ci_low=Rmisc::CI(mean_phastcons_dist, ci = 0.95)[3],
-    phastcons_dist_ci_mean=Rmisc::CI(mean_phastcons_dist, ci = 0.95)[2],
-    phastcons_dist_ci_up=Rmisc::CI(mean_phastcons_dist, ci = 0.95)[1],
-    ## Phastons in distal CREs (glires)
-    phastcons_glires_dist_ci_low=Rmisc::CI(mean_phastcons_glires_dist, ci = 0.95)[3],
-    phastcons_glires_dist_ci_mean=Rmisc::CI(mean_phastcons_glires_dist, ci = 0.95)[2],
-    phastcons_glires_dist_ci_up=Rmisc::CI(mean_phastcons_glires_dist, ci = 0.95)[1],
-    ## Minimum age of distal elements (liftover)
-    age_dist_ci_low=Rmisc::CI(mean_Age_dist, ci = 0.95)[3],
-    age_dist_ci_mean=Rmisc::CI(mean_Age_dist, ci = 0.95)[2],
-    age_dist_ci_up=Rmisc::CI(mean_Age_dist, ci = 0.95)[1],
-    ## Repeat fraction of distal elements
-    rep_dist_ci_low=Rmisc::CI(mean_repeatFraction_dist, ci = 0.95)[3],
-    rep_dist_ci_mean=Rmisc::CI(mean_repeatFraction_dist, ci = 0.95)[2],
-    rep_dist_ci_up=Rmisc::CI(mean_repeatFraction_dist, ci = 0.95)[1],
-    ## Fraction of reads in coding promoters
-    cod_prom_f_ci_low=Rmisc::CI(cod_prom_f, ci = 0.95)[3],
-    cod_prom_f_ci_mean=Rmisc::CI(cod_prom_f, ci = 0.95)[2],
-    cod_prom_f_ci_up=Rmisc::CI(cod_prom_f, ci = 0.95)[1],
-    ## GC content of distal peaks within bin (control)
-    gc_dist_ci_low=Rmisc::CI(mean_GC_dist, ci = 0.95)[3],
-    gc_dist_ci_mean=Rmisc::CI(mean_GC_dist, ci = 0.95)[2],
-    gc_dist_ci_up=Rmisc::CI(mean_GC_dist, ci = 0.95)[1],
+    mean_phastcons_dist=mean(mean_phastcons_dist),
+    mean_age_dist=mean(mean_Age_dist),
+    mean_rep_dist=mean(mean_repeatFraction_dist),
     ## Number of cells in each bin
-    count=n())
+    count=n()) %>%
+  ungroup() %>%
+  group_by(Cell_type_broad, Cell_type_broad_color, Timepoint) %>%
+  summarise(
+    phastcons_dist_ci_up=max(mean_phastcons_dist),
+    phastcons_dist_ci_mean=mean(mean_phastcons_dist),
+    phastcons_dist_ci_low=min(mean_phastcons_dist),
+    
+    age_dist_ci_up=max(mean_age_dist),
+    age_dist_ci_mean=mean(mean_age_dist),
+    age_dist_ci_low=min(mean_age_dist),
+    
+    rep_dist_ci_up=max(mean_rep_dist),
+    rep_dist_ci_mean=mean(mean_rep_dist),
+    rep_dist_ci_low=min(mean_rep_dist),
+    count=sum(count)
+  )
 
 cell_lineage_stats$t <- as.numeric(factor(cell_lineage_stats$Timepoint))
 cell_lineage_stats <- droplevels(cell_lineage_stats)
 ```
 
-All broad cell types in the dataset
-
-```{r}
-p <- ggplot(filter(cell_lineage_stats, count >=50), aes(x=t, y= phastcons_dist_ci_mean, color=Cell_type_broad)) +
-  geom_pointrange(aes(ymin=phastcons_dist_ci_low, ymax= phastcons_dist_ci_up)) +
-  geom_line() +
-  scale_x_continuous(breaks = seq(min(cell_lineage_stats$t), max(cell_lineage_stats$t), by = 1), labels=sort(unique(cell_lineage_stats$Timepoint))) +
-  scale_color_manual(values = levels(cell_lineage_stats$Cell_type_broad_color)) +
-  #scale_y_continuous(breaks = seq(0.4, 0.6, by = 0.02)) +
-  theme_classic() +
-  ylab("Phastcons vertebrates (distal CREs)") +
-    xlab("Developmental stage") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid.minor.x = element_blank(), panel.grid.major.x = element_blank())
-
-p
-
-pdf("~/Mouse_Cereb/Figures/008_conservation/Mouse_cerebellum_CellTypesBroad_all_phastCons_vertebrates.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
-```
-
-Focusing on major cerebellar cell types:
 
 ```{r}
 cell_lineage_stats_major <- filter(cell_lineage_stats, !Cell_type_broad %in% c("Isthmic_nuclei", "MBO", "Parabrachial")) %>%
@@ -85,101 +60,41 @@ cell_lineage_stats_major <- filter(cell_lineage_stats, !Cell_type_broad %in% c("
 p <- ggplot(filter(cell_lineage_stats_major, count >=50), aes(x=t, y= phastcons_dist_ci_mean, color=Cell_type_broad)) +
   geom_pointrange(aes(ymin=phastcons_dist_ci_low, ymax= phastcons_dist_ci_up)) +
   geom_line() +
-  scale_x_continuous(breaks = seq(min(cell_lineage_stats_major$t), max(cell_lineage_stats_major$t), by = 1), labels=sort(unique(cell_lineage_stats_major$Timepoint))) +
+  scale_x_continuous(breaks = seq(min(cell_lineage_stats_major$t), max(cell_lineage_stats_major$t), by = 1), labels=toupper(sort(unique(cell_lineage_stats_major$Timepoint)))) +
   scale_color_manual(values = levels(cell_lineage_stats_major$Cell_type_broad_color)) +
   #scale_y_continuous(breaks = seq(0.4, 0.6, by = 0.02)) +
   theme_classic() +
-  ylab("Phastcons vertebrates (distal CREs)") +
+  ylab("PhastCons vertebrates (intergenic CREs)") +
   xlab("Developmental stage") +
   theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid.minor.x = element_blank(), panel.grid.major.x = element_blank())
 
 p
 
-pdf("~/Mouse_Cereb/Figures/008_conservation/Mouse_cerebellum_CellTypesBroad_majorCellTypes_phastCons_vertebrates.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+pdf("~/Mouse_Cereb/Revisions/Figures/007_Mouse_cerebellum_intergenic_phastCons_byCellType_andStage.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
 ```
-
-```{r}
-group_by(cell_lineage_stats_major, Cell_type_broad) %>%
-  summarise(r=cor.test(phastcons_dist_ci_mean, t, method = "pearson")$estimate,
-            p=cor.test(phastcons_dist_ci_mean, t, method = "pearson")$p.value) %>%
-  summarise(median(r),
-            median(p))
-
-group_by(cell_lineage_stats_major, Cell_type_broad) %>%
-  summarise(r=cor.test(phastcons_glires_dist_ci_mean, t, method = "pearson")$estimate,
-            p=cor.test(phastcons_glires_dist_ci_mean, t, method = "pearson")$p.value) %>%
-  summarise(median(r),
-            median(p))
-
-group_by(cell_lineage_stats_major, Cell_type_broad) %>%
-  summarise(r=cor.test(age_dist_ci_mean, t, method = "pearson")$estimate,
-            p=cor.test(age_dist_ci_mean, t, method = "pearson")$p.value) %>%
-  summarise(median(r),
-            median(p))
-
-group_by(cell_lineage_stats_major, Cell_type_broad) %>%
-  summarise(r=cor.test(rep_dist_ci_mean, t, method = "pearson")$estimate,
-            p=cor.test(rep_dist_ci_mean, t, method = "pearson")$p.value) %>%
-  summarise(median(r),
-            median(p))
-
-options(scipen = 1)
-wilcox.test(cell.stats$mean_phastcons_dist[cell.stats$Cell_type_broad=="Microglia" & cell.stats$Timepoint=="P63"], cell.stats$mean_phastcons_dist[cell.stats$Cell_type_broad!="Microglia" & cell.stats$Timepoint=="P63"])
-
-
-options(scipen = 1)
-wilcox.test(cell.stats$mean_phastcons_dist[cell.stats$Cell_type_broad=="Astroglia" & cell.stats$Timepoint=="P63"], cell.stats$mean_phastcons_dist[cell.stats$Cell_type_broad!="Astroglia" & cell.stats$Timepoint=="P63"])
-
-options(scipen = 1)
-wilcox.test(cell.stats$mean_phastcons_dist[cell.stats$Cell_type_broad=="GC" & cell.stats$Timepoint=="e13"], cell.stats$mean_phastcons_dist[cell.stats$Cell_type_broad!="GC" & cell.stats$Timepoint=="e13"])
-```
-
-
-phastCons glires
-
-```{r}
-p <- ggplot(filter(cell_lineage_stats_major, count >=50), aes(x=t, y= phastcons_glires_dist_ci_mean, color=Cell_type_broad)) +
-  geom_pointrange(aes(ymin=phastcons_glires_dist_ci_low, ymax= phastcons_glires_dist_ci_up)) +
-  geom_line() +
-  scale_x_continuous(breaks = seq(min(cell_lineage_stats_major$t), max(cell_lineage_stats_major$t), by = 1), labels=sort(unique(cell_lineage_stats_major$Timepoint))) +
-  scale_color_manual(values = levels(cell_lineage_stats_major$Cell_type_broad_color)) +
-  #scale_y_continuous(breaks = seq(0.4, 0.6, by = 0.02)) +
-  theme_classic() +
-  ylab("PhastCons glires (distal CREs)") +
-  xlab("Developmental stage") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid.minor.x = element_blank(), panel.grid.major.x = element_blank())
-
-p
-
-pdf("~/Mouse_Cereb/Figures/008_conservation/Mouse_cerebellum_CellTypesBroad_majorCellTypes_phastCons_glires.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
-```
-
-Minimum age
 
 ```{r}
 p <- ggplot(filter(cell_lineage_stats_major, count >=50), aes(x=t, y= age_dist_ci_mean, color=Cell_type_broad)) +
   geom_pointrange(aes(ymin=age_dist_ci_low, ymax= age_dist_ci_up)) +
   geom_line() +
-  scale_x_continuous(breaks = seq(min(cell_lineage_stats_major$t), max(cell_lineage_stats_major$t), by = 1), labels=sort(unique(cell_lineage_stats_major$Timepoint))) +
+  scale_x_continuous(breaks = seq(min(cell_lineage_stats_major$t), max(cell_lineage_stats_major$t), by = 1), labels=toupper(sort(unique(cell_lineage_stats_major$Timepoint)))) +
   scale_color_manual(values = levels(cell_lineage_stats_major$Cell_type_broad_color)) +
   #scale_y_continuous(breaks = seq(0.4, 0.6, by = 0.02)) +
   theme_classic() +
-  ylab("Minimum age (distal CREs)") +
+  ylab("Minimum age (intergenic CREs)") +
   xlab("Developmental stage") +
   theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid.minor.x = element_blank(), panel.grid.major.x = element_blank())
 
 p
 
-pdf("~/Mouse_Cereb/Figures/008_conservation/Mouse_cerebellum_CellTypesBroad_majorCellTypes_minimumAge.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+pdf("~/Mouse_Cereb/Revisions/Figures/007_Mouse_cerebellum_intergenic_age_byCellType_andStage.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
 ```
-
-Repeat fraction
 
 ```{r}
 p <- ggplot(filter(cell_lineage_stats_major, count >=50), aes(x=t, y= rep_dist_ci_mean, color=Cell_type_broad)) +
   geom_pointrange(aes(ymin=rep_dist_ci_low, ymax= rep_dist_ci_up)) +
   geom_line() +
-  scale_x_continuous(breaks = seq(min(cell_lineage_stats_major$t), max(cell_lineage_stats_major$t), by = 1), labels=sort(unique(cell_lineage_stats_major$Timepoint))) +
+  scale_x_continuous(breaks = seq(min(cell_lineage_stats_major$t), max(cell_lineage_stats_major$t), by = 1), labels=toupper(sort(unique(cell_lineage_stats_major$Timepoint)))) +
   scale_color_manual(values = levels(cell_lineage_stats_major$Cell_type_broad_color)) +
   #scale_y_continuous(breaks = seq(0.4, 0.6, by = 0.02)) +
   theme_classic() +
@@ -189,29 +104,32 @@ p <- ggplot(filter(cell_lineage_stats_major, count >=50), aes(x=t, y= rep_dist_c
 
 p
 
-pdf("~/Mouse_Cereb/Figures/008_conservation/Mouse_cerebellum_CellTypesBroad_majorCellTypes_repeatFraction.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+pdf("~/Mouse_Cereb/Revisions/Figures/007_Mouse_cerebellum_intergenic_repeats_byCellType_andStage.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
 ```
 
-Also excluding microglia:
-
 ```{r}
-cell_lineage_stats_noMicroglia <- filter(cell_lineage_stats_major, Cell_type_broad != "Microglia") %>%
-  droplevels()
+filter(cell_lineage_stats_major, count >=50) %>%
+  group_by(Cell_type_broad) %>%
+  summarise(r=cor.test(phastcons_dist_ci_mean, t, method = "pearson")$estimate,
+            p=cor.test(phastcons_dist_ci_mean, t, method = "pearson")$p.value) %>%
+  summarise(median(r),
+            median(p))
 
-p <- ggplot(filter(cell_lineage_stats_noMicroglia, count >=50), aes(x=t, y= phastcons_dist_ci_mean, color=Cell_type_broad)) +
-  geom_pointrange(aes(ymin=phastcons_dist_ci_low, ymax= phastcons_dist_ci_up)) +
-  geom_line() +
-  scale_x_continuous(breaks = seq(min(cell_lineage_stats_noMicroglia$t), max(cell_lineage_stats_noMicroglia$t), by = 1), labels=sort(unique(cell_lineage_stats_noMicroglia$Timepoint))) +
-  scale_color_manual(values = levels(cell_lineage_stats_noMicroglia$Cell_type_broad_color)) +
-  #scale_y_continuous(breaks = seq(0.4, 0.6, by = 0.02)) +
-  theme_classic() +
-  ylab("Phastcons vertebrates (distal CREs)") +
-  xlab("Developmental stage") +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid.minor.x = element_blank(), panel.grid.major.x = element_blank())
 
-p
+filter(cell_lineage_stats_major, count >=50) %>%
+  group_by(Cell_type_broad) %>%
+  summarise(r=cor.test(age_dist_ci_mean, t, method = "pearson")$estimate,
+            p=cor.test(age_dist_ci_mean, t, method = "pearson")$p.value) %>%
+  summarise(median(r),
+            median(p))
 
-pdf("~/Mouse_Cereb/Figures/008_conservation/Mouse_cerebellum_CellTypesBroad_noMicroglia_phastCons_vertebrates.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+
+filter(cell_lineage_stats_major, count >=50) %>%
+  group_by(Cell_type_broad) %>%
+  summarise(r=cor.test(rep_dist_ci_mean, t, method = "pearson")$estimate,
+            p=cor.test(rep_dist_ci_mean, t, method = "pearson")$p.value) %>%
+  summarise(median(r),
+            median(p))
 ```
 
 ```{r}

@@ -35,7 +35,7 @@ proj <- addCoAccessibility(
     k = 50,
     knnIteration = 5000,
     overlapCutoff = 0.5,
-    maxDist = 1e5,
+    maxDist = 2.5e5,
     seed = 1, 
     log2Norm = T
 )

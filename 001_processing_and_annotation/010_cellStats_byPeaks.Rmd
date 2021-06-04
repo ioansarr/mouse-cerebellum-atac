@@ -1,0 +1,72 @@
+---
+title: "Mouse Cerebellum 010 - Cell stats by peaks"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(RColorBrewer)
+  library(viridis)
+  library(ComplexHeatmap)
+  library(data.table)
+  library(SummarizedExperiment)
+})
+```
+
+Loading our peak matrix and info summary
+
+```{r}
+peak_mat <- readRDS("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peak_matrix_SE_withInfo_robustPeaks.rds")
+
+peak.info <- read.table("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt", header = T, sep = "\t", stringsAsFactors = F)
+```
+
+Per cell in our dataset, we will calculate different summary statistics based on the peaks being used. To improve computational efficiency, we will split across clusters to avoid creating very large matrices:
+
+```{r}
+clust <- sort(unique(peak_mat@colData$Clusters_finalNucSet_res1.5))
+
+cell.stats <- Reduce(bind_rows, lapply(clust, function(id) {
+  print(paste0("Preparing matrix for: ", id))
+  cell_i <- which(peak_mat@colData$Clusters_finalNucSet_res1.5==id)
+  atac.data <- assay(peak_mat[,cell_i])
+  row.names(atac.data) <- peak_mat@elementMetadata$peak
+  summ <- Matrix::summary(atac.data)
+  atac.data.tidy <- data.frame(peak = rownames(atac.data)[summ$i],
+           cell = colnames(atac.data)[summ$j],
+           count = summ$x, stringsAsFactors = F)
+  atac.data.tidy <- left_join(atac.data.tidy, select(peak.info, peak, genomic_class, genomic_class_broad, meanPhastCons_100bp, min_age_num, repeatOverlap, repeatFraction, GC))
+  print(paste0("Generating stats for: ", id))
+  cell.stats <- group_by(atac.data.tidy, cell) %>%
+  summarise(mean_phastcons_dist = mean(meanPhastCons_100bp[genomic_class_broad %in% c("Distal")]),
+            mean_repeatFraction_dist = mean(repeatFraction[genomic_class_broad %in% c("Distal")]),
+            mean_Age_dist = mean(min_age_num[genomic_class_broad %in% c("Distal")]),
+            mean_GC_dist = mean(GC[genomic_class_broad %in% c("Distal")]),
+            prom=sum(genomic_class_broad=="Promoter"),
+            cod_prom=sum(genomic_class=="protein_coding-Promoter"),
+            lncRNA_prom=sum(genomic_class=="lncRNA-Promoter"),
+            exonic=sum(genomic_class_broad=="Exonic"),
+            intronic=sum(genomic_class_broad=="Intronic"),
+            distal=sum(genomic_class_broad=="Distal"),
+            total=n(),
+            count_sum=sum(count))
+  return(cell.stats)
+}))
+
+cell.stats$cod_prom_f <- cell.stats$cod_prom / cell.stats$total
+cell.stats$dist_f <- cell.stats$distal / cell.stats$total
+```
+
+Exporting data
+
+```{r}
+saveRDS(cell.stats, "~/Mouse_Cereb/Revisions/007_conservation_backgroundDist/Mouse_Cerebellum_cellStats_byPeaks_distOnly.rds")
+```
+
+```{r}
+sessionInfo()
+```
+

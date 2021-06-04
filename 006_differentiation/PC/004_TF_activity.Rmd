@@ -30,9 +30,9 @@ lineage <- "PC"
 #2. Correlation cutoff (absolute)
 corr_cutoff <- 0.6
 #3. Gene activity cutoff (minimum gene expression activity to consider TF active)
-rna_cutoff <- 1
+rna_cutoff <- 1.5
 #4. Optimal number of Mfuzz clusters for TFs: Determined by calculating distance between cluster centroids, visual observation of trajectories, and GO enrichment of each cluster.
-N_tf_clusters <- 3
+N_tf_clusters <- 6
 ```
 
 Load data
@@ -124,35 +124,21 @@ sig.tfs$class <- ifelse(sig.tfs$corr_motif_rna > 0, yes = "activator", no = "rep
 table(sig.tfs$class)
 ```
 
-Now we can take all these TFs and cluster them based on their activity across pseudotime
+It doesn't make sense to cluster TFs given how few they are (and that each seems to be different).
+
+Instead we can order them based on their pseudotemporal activity.
+
+We have to keep in mind that repressors are active when motif accessibility is low.
 
 ```{r}
-motifs_tfs <- as.matrix(motifs[sig.tfs$motif,])
+sig.tfs$pseudotimeActivity <- sapply(1:nrow(sig.tfs), function(i) {
+  tf <- sig.tfs$gene[i]
+  median(which(as.numeric(genes[tf,]) >= 0.8 * sig.tfs$rna_max[i]))
+})
 
-motifs_tfs.z <- motifs_tfs - apply(motifs_tfs, 1, mean)
-motifs_tfs.z <- motifs_tfs.z / apply(motifs_tfs, 1, sd)
 ```
 
-Mfuzz clustering
-
-```{r}
-motifs_tfs.z.eset <- ExpressionSet(motifs_tfs.z)
-
-m1 <- mestimate(motifs_tfs.z.eset)
-m1
-
-## So far, maximising the minimum distance between cluster centroids seems to be the best way to optimise the number of clusters.
-set.seed(1)
-c_dmin_tfs <- Dmin(motifs_tfs.z.eset,m1,crange=seq(3,10,1),repeats = 5)
-
-set.seed(1)
-tfs_clust <- mfuzz(motifs_tfs.z.eset,c=N_tf_clusters,m=m1)
-
-mfuzz.plot2(motifs_tfs.z.eset, tfs_clust, colo = "fancy", x11 = F, centre = T, mfrow = c(2,3))
-table(tfs_clust$cluster)
-```
-
-```{r, fig.height=6, fig.width=8}
+```{r, fig.height=6, fig.width=6}
 ## Counting timepoints abundance per pseudotime bin
 bin_counts <- group_by(pseudotime_bins, pseudotime_bin, timepoint) %>%
   dplyr::count() %>%
@@ -180,7 +166,12 @@ tf_family <- read_tsv("~/Resources/cisBP/TF_Information.txt") %>%
   unique() %>%
   dplyr::rename(gene=TF_Name, TF_family=Family_Name) %>%
   right_join(sig.tfs)  %>%
-  arrange(motif)
+  arrange(class, pseudotimeActivity)
+
+## Selecting motif matrix and standardizing
+motifs_tfs <- as.matrix(motifs[tf_family$motif,])
+motifs_tfs.z <- motifs_tfs - apply(motifs_tfs, 1, mean)
+motifs_tfs.z <- motifs_tfs.z / apply(motifs_tfs, 1, sd)
 
 ## Keeping only prevalent families and setting the rest to other
 # top_families <- filter(tf_family, is.na(TF_family)==F) %>%
@@ -196,8 +187,6 @@ top_families <- c("AT hook", "bHLH", "bZIP", "C2H2 ZF", "Ets", "Forkhead", "Home
 
 tf_family$TF_family[!(tf_family$TF_family %in% top_families)] <- "Other"
 
-tf_family$Mfuzz_clust <- tfs_clust$cluster
-
 n <- brewer.pal(11, "Set3")
 names(n) <- top_families
 
@@ -207,19 +196,18 @@ cor_col_fun = circlize::colorRamp2(c(-1, 0, 1), c("firebrick3","white", "deepsky
 left_anno <- rowAnnotation(tf_family=tf_family$TF_family, corr= tf_family$corr_motif_rna, col=list(tf_family=n, corr=cor_col_fun), border=T, annotation_legend_param = list(direction = "vertical"))
 
 ## Specifying interesting TFs to display
-interesting_motifs_i <- grep("Lhx5|Neurog2|Esrrb|Olig2|Zic4|Zic5|Zeb1|Rora|Mef2c|Sox2-|Nhlh1|Foxp2|Id3|Ascl1",row.names(motifs_tfs.z))
+interesting_motifs_i <- grep("Lhx5|Neurog2|Esrrb|Olig2|Zic4|Zic5|Zeb1|Rora|Mef2c|Sox2-|Nhlh1|Foxp2|Id1|Ascl1|Myt1l|tcf4|Nr2f1",row.names(motifs_tfs.z))
 
 interesting_motifs_names <- sapply(row.names(motifs_tfs.z)[interesting_motifs_i], function(x) str_split(x, "-", simplify = T)[1])
 
 tf_names = rowAnnotation(foo = anno_mark(at = interesting_motifs_i, labels = interesting_motifs_names), annotation_legend_param = list(direction = "vertical",nrow = 1, labels_gp = gpar(fontsize = 0.1), padding = unit(10, "mm")))
 
 draw(Heatmap(matrix = motifs_tfs.z,
-        row_split =tf_family$Mfuzz_clust,
-        cluster_row_slices=T,
+        row_split =tf_family$class,
+        cluster_row_slices=F,
         top_annotation = ha,
-        cluster_rows = T,
+        cluster_rows = F,
         cluster_columns = F,
-        clustering_distance_rows = "pearson",
         show_row_names = F,
         show_column_names = F,
         col=viridis(100,option = "A"),
@@ -228,13 +216,12 @@ draw(Heatmap(matrix = motifs_tfs.z,
         border = TRUE,
         heatmap_legend_param = list(direction = "vertical", title = "Z-score motif")), heatmap_legend_side = "right")
 
-pdf(paste0("~/Mouse_Cereb/Figures/007_withinLineages/", lineage, "/Mouse_within", lineage, "_pseudotime_TFs_Mfuzz_heatmap.pdf"), width = 8, height = 8, useDingbats = F);draw(Heatmap(matrix = motifs_tfs.z,
-        row_split =tf_family$Mfuzz_clust,
-        cluster_row_slices=T,
+pdf(paste0("~/Mouse_Cereb/Revisions/Figures/004_", lineage, "_pseudotime_TFs_Mfuzz_heatmap.pdf"), width = 6, height = 6, useDingbats = F);draw(Heatmap(matrix = motifs_tfs.z,
+        row_split =tf_family$class,
+        cluster_row_slices=F,
         top_annotation = ha,
-        cluster_rows = T,
+        cluster_rows = F,
         cluster_columns = F,
-        clustering_distance_rows = "pearson",
         show_row_names = F,
         show_column_names = F,
         col=viridis(100,option = "A"),
@@ -247,9 +234,9 @@ pdf(paste0("~/Mouse_Cereb/Figures/007_withinLineages/", lineage, "/Mouse_within"
 Export
 
 ```{r}
-write_tsv(tf_activity, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_TF_motif_and_RNA_inPseudotime.txt"))
+write_tsv(tf_activity, paste0("~/Mouse_Cereb/Revisions/004_TF_networks/", lineage, "_TF_motif_and_RNA_inPseudotime.txt"))
 
-write_tsv(tf_family, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_TF_motif_and_RNA_inPseudotime_significantTFs.txt"))
+write_tsv(tf_family, paste0("~/Mouse_Cereb/Revisions/004_TF_networks/", lineage, "_TF_motif_and_RNA_inPseudotime_significantTFs.txt"))
 ```
 
 

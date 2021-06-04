@@ -1,0 +1,258 @@
+---
+title: "Opossum ArchR annotation"
+output: html_document
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(ArchR)
+  library(BSgenome)
+  library(GenomicRanges)
+})
+```
+
+## Genome annotation
+
+First, we need to create a BSgenome package. Even though there is already a mondom5 package on Bioconductor, we need one that accounts for splitting of the first 2 chromosomes (required for tools such as cellranger and bedtools).
+
+For this, we first need to convert our fasta file into 2bit format:
+
+```{bash, eval=FALSE}
+./faToTwoBit /home/ioansarr/Opo_Cereb/001_prep_annotation/001_makeCellranger/monDom5_splitChr/fasta/genome.fa monDom5_splitChr.2bit
+```
+
+Now we need to forge the genome
+
+```{r, eval=FALSE}
+forgeBSgenomeDataPkg("/home/ioansarr/Opo_Cereb/000_prep_annotation/002_makeArchRanno/monDom5_splitChr_seed")
+```
+
+```{bash, eval=FALSE}
+R CMD build BSgenome.MonDomSplitChr.Ensembl.monDom5
+R CMD check BSgenome.MonDomSplitChr.Ensembl.monDom5_1.0.tar.gz
+R CMD INSTALL BSgenome.MonDomSplitChr.Ensembl.monDom5_1.0.tar.gz
+```
+
+Creating an ArchR genome annotation object.
+
+```{r}
+library("BSgenome.MonDomSplitChr.Ensembl.monDom5")
+
+BSgenome.MonDomSplitChr.Ensembl.monDom5
+
+mondom5 <- createGenomeAnnotation(BSgenome.MonDomSplitChr.Ensembl.monDom5, 
+                                  filter = F)
+```
+
+## Gene annotation
+
+Now we need to create a gene annotation as well. This requires GRanges objects for exons, genes and TSS, with matching TSS symbols.
+
+```{r}
+ensembl.gtf <- read_tsv("~/Opo_Cereb/000_prep_annotation/001_makeCellranger/monDom.ensembl_splitChr.gtf", col_names = F)
+
+## This is a good oportunity to incorporate additional transcribed units (lncRNAs, pseudogenes) identified in our evodevo study (Sarropoulos et al. 2019)
+xloc.gtf <- read_tsv("~/Resources/Sarropoulos_etal_Nature_2019/opossum.final.gtf", col_names = F, col_types = "cccnncccc")
+## Keeping only XLOCs
+table(xloc.gtf$X3)
+table(xloc.gtf$X2)
+xloc.gtf <- filter(xloc.gtf, X2 %in% c("lncRNA", "putative_coding"))
+## Applying the same transformation in coordinates
+xloc.gtf$X1 <- paste0("chr", xloc.gtf$X1)
+
+i <- which(xloc.gtf$X5 > 536141000)
+length(i)
+
+xloc.gtf$X1[i] <- paste0(xloc.gtf$X1[i], "b")
+xloc.gtf$X4[i] <- xloc.gtf$X4[i] - 536141000
+xloc.gtf$X5[i] <- xloc.gtf$X5[i] - 536141000
+
+## Checks
+table(xloc.gtf$X1)
+sum(xloc.gtf$X4 > 536141000)
+sum(xloc.gtf$X5 > 536141000)
+sum(xloc.gtf$X4 < 0)
+sum(xloc.gtf$X5 < 0)
+xloc.gtf[xloc.gtf$X4 < 0,]
+```
+
+### Genes
+
+XLOC genes
+
+```{r}
+xloc.gtf$gene_id <- gsub("gene_id ", "", str_split(xloc.gtf$X9, ";", simplify = T)[,1])
+xloc.genes <- group_by(xloc.gtf, gene_id) %>%
+  summarise(
+    chr=unique(X1),
+    start=min(X4),
+    end=max(X5),
+    strand=unique(X7),
+    biotype=unique(X2)
+  )
+
+xloc.genes.gr <- GRanges(seqnames = xloc.genes$chr,
+                         ranges = IRanges(start = xloc.genes$start,
+                                          end = xloc.genes$end),
+                         strand = xloc.genes$strand)
+
+mcols(xloc.genes.gr)$gene_id <- xloc.genes$gene_id
+mcols(xloc.genes.gr)$symbol <- xloc.genes$gene_id
+mcols(xloc.genes.gr)$biotype <- xloc.genes$biotype
+mcols(xloc.genes.gr)$source <- "Kaessmann"
+```
+
+Ensembl genes
+
+```{r}
+ensembl.genes <- filter(ensembl.gtf, X3=="gene")
+ensembl.genes$gene_id <- str_extract(ensembl.genes$X9, "ENSMODG[0-9]*")
+ensembl.genes.gr <- GRanges(seqnames = ensembl.genes$X1,
+                         ranges = IRanges(start = ensembl.genes$X4,
+                                          end = ensembl.genes$X5),
+                         strand = ensembl.genes$X7)
+
+mcols(ensembl.genes.gr)$gene_id <- ensembl.genes$gene_id
+
+x9 <- str_split(ensembl.genes$X9, ";")
+
+biotype <- sapply(x9, function(x) grep("gene_biotype", x,value = T))
+biotype <- gsub(' gene_biotype \"', "", biotype, fixed = T)
+biotype <- gsub('\"', "", biotype, fixed = T)
+
+gene_name <- sapply(x9, function(x) grep("gene_name", x,value = T))
+gene_name <- gsub(' gene_name \"', "", gene_name, fixed = T)
+gene_name <- gsub('\"', "", gene_name, fixed = T)
+
+mcols(ensembl.genes.gr)$symbol <- gene_name
+mcols(ensembl.genes.gr)$biotype <- biotype
+mcols(ensembl.genes.gr)$source <- ensembl.genes$X2
+```
+
+Finding overlaps between XLOCs and Ensembl on the same strand. In case of overlaps we will keep the Ensembl version.
+
+```{r}
+xloc.ensembl.overlaps <- findOverlaps(xloc.genes.gr, ensembl.genes.gr, ignore.strand=FALSE)
+## XLOCs not overlapping Ensembl entries in the same strand:
+xloc.genes.gr.nr <- xloc.genes.gr[-queryHits(xloc.ensembl.overlaps)]
+
+combined.genes.gr <- c(ensembl.genes.gr, xloc.genes.gr.nr)
+combined.genes.gr
+```
+
+### Exons
+
+Now getting the exons:
+
+```{r}
+ensembl.exons <- filter(ensembl.gtf, X3=="exon")
+ensembl.exons$gene_id <- str_extract(ensembl.exons$X9, "ENSMODG[0-9]*")
+ensembl.exons.gr <- GRanges(seqnames = ensembl.exons$X1,
+                         ranges = IRanges(start = ensembl.exons$X4,
+                                          end = ensembl.exons$X5),
+                         strand = ensembl.exons$X7)
+
+mcols(ensembl.exons.gr)$gene_id <- ensembl.exons$gene_id
+
+x9 <- str_split(ensembl.exons$X9, ";")
+
+biotype <- sapply(x9, function(x) grep("gene_biotype", x,value = T))
+biotype <- gsub(' gene_biotype \"', "", biotype, fixed = T)
+biotype <- gsub('\"', "", biotype, fixed = T)
+
+gene_name <- sapply(x9, function(x) grep("gene_name", x,value = T))
+gene_name <- gsub(' gene_name \"', "", gene_name, fixed = T)
+gene_name <- gsub('\"', "", gene_name, fixed = T)
+
+mcols(ensembl.exons.gr)$symbol <- gene_name
+mcols(ensembl.exons.gr)$biotype <- biotype
+mcols(ensembl.exons.gr)$source <- ensembl.exons$X2
+```
+
+```{r}
+xloc.exons.gr <- GRanges(seqnames = xloc.gtf$X1,
+                         ranges = IRanges(start = xloc.gtf$X4,
+                                          end = xloc.gtf$X5),
+                         strand = xloc.gtf$X7)
+
+mcols(xloc.exons.gr)$gene_id <- xloc.gtf$gene_id
+mcols(xloc.exons.gr)$symbol <- xloc.gtf$gene_id
+mcols(xloc.exons.gr)$biotype <- xloc.gtf$X2
+mcols(xloc.exons.gr)$source <- "Kaessmann"
+```
+
+```{r}
+xloc.exons.gr.nr <- xloc.exons.gr[xloc.exons.gr$gene_id %in% xloc.genes.gr.nr$gene_id]
+```
+
+```{r}
+combined.exons.gr <- c(ensembl.exons.gr, xloc.exons.gr.nr)
+```
+
+### TSS
+
+For TSS annotation, we will simply extract the first exon from each transcript (exon_number 1) and keep the start (+) or end (-) coordinate depending on the strand:
+
+```{r}
+ensembl.exons.exon1 <- filter(ensembl.exons, grepl('exon_number \"1\"', X9))
+ensembl.exons.exon1$tss <- ifelse(ensembl.exons.exon1$X7=="+", yes = ensembl.exons.exon1$X4, no = ensembl.exons.exon1$X5)
+
+x9 <- str_split(ensembl.exons.exon1$X9, ";")
+
+transcript_id <- sapply(x9, function(x) grep("transcript_id", x,value = T))
+transcript_id <- gsub(' transcript_id \"', "", transcript_id, fixed = T)
+transcript_id <- gsub('\"', "", transcript_id, fixed = T)
+
+ensembl.exons.exon1$transcript_id <- transcript_id
+
+ensembl.tss.gr <- GRanges(seqnames = ensembl.exons.exon1$X1,
+                       ranges = IRanges(ensembl.exons.exon1$tss, width = 1),
+                       strand = ensembl.exons.exon1$X7)
+
+mcols(ensembl.tss.gr)$transcript_id <- ensembl.exons.exon1$transcript_id
+mcols(ensembl.tss.gr)$gene_id <- ensembl.exons.exon1$gene_id
+```
+
+```{r}
+xloc.exons.exon1.nr <- filter(xloc.gtf, grepl('exon_number 1', X9), gene_id %in% xloc.genes.gr.nr$gene_id)
+
+xloc.exons.exon1.nr$tss <- ifelse(xloc.exons.exon1.nr$X7=="+", yes = xloc.exons.exon1.nr$X4, no = xloc.exons.exon1.nr$X5)
+
+xloc.exons.exon1.nr$transcript_id <- str_extract(xloc.exons.exon1.nr$X9, "Opo_TCONS_[0-9]*")
+
+xloc.tss.gr <- GRanges(seqnames = xloc.exons.exon1.nr$X1,
+                       ranges = IRanges(xloc.exons.exon1.nr$tss, width = 1),
+                       strand = xloc.exons.exon1.nr$X7)
+
+mcols(xloc.tss.gr)$transcript_id <- xloc.exons.exon1.nr$transcript_id
+mcols(xloc.tss.gr)$gene_id <- xloc.exons.exon1.nr$gene_id
+
+```
+
+```{r}
+combined.tss.gr <- c(ensembl.tss.gr, xloc.tss.gr)
+```
+
+```{r}
+mondom5_geneAnnotation <- createGeneAnnotation(
+  genome = "mondom5",
+  TSS = combined.tss.gr, 
+  exons = combined.exons.gr, 
+  genes = combined.genes.gr
+)
+```
+
+Exporting the genome and gene annotation
+
+```{r}
+saveRDS(mondom5, "~/Opo_Cereb/000_prep_annotation/002_makeArchRanno/ArcR_monDom5_splitChr_genomeAnnotation.rds")
+saveRDS(mondom5_geneAnnotation, "~/Opo_Cereb/000_prep_annotation/002_makeArchRanno/ArcR_monDom5_splitChr_ens96andXLOCs_geneAnnotation.rds")
+```
+
+```{r}
+sessionInfo()
+```
+

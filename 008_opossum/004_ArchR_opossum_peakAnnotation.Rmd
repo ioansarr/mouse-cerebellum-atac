@@ -1,0 +1,488 @@
+---
+title: "ArchR_004_peak_annotation"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ArchR)
+  library(tidyverse)
+  library(RColorBrewer)
+  library(GenomicRanges)
+})
+```
+
+```{r}
+options(scipen=999)
+
+setwd("~/Opo_Cereb/")
+
+proj <- loadArchRProject("~/Opo_Cereb/proj3_peaks")
+
+union.peaks <- getPeakSet(proj)
+
+length(union.peaks)
+```
+
+```{r}
+peak_names <- paste(seqnames(union.peaks), start(ranges(union.peaks)), end(ranges(union.peaks)), sep = "_")
+peak.bed <- data.frame(chr=seqnames(union.peaks),
+                       start=start(ranges(union.peaks)),
+                       end=end(ranges(union.peaks)),
+                       peak=peak_names, stringsAsFactors = F)
+
+peaks <- as.data.frame(union.peaks@elementMetadata)
+peaks$peak=peak_names
+
+peaks <- left_join(peak.bed, peaks)
+
+if(dir.exists("~/Opo_Cereb/004_peaks") == F) {
+  dir.create("~/Opo_Cereb/004_peaks")
+}
+
+write.table(peak.bed, "~/Opo_Cereb/004_peaks/Opossum_Cerebellum_reproducible_peaks.bed",col.names = F, row.names = F, sep = "\t", quote = F)
+```
+
+## Genomic context
+
+Here we have already included XLOCs (from Sarropoulos 2019) in the ArchR annotation.
+
+Therefore, all we need to do is annotate the peaks based on the biotype of their associated gene.
+
+```{r}
+## Matching terminology to what we used for mouse
+peaks <- dplyr::rename(peaks, associated_gene=nearestGene, 
+                       genomic_class_broad=peakType,
+                       closest_TSS_dist=distToTSS)
+
+## Reading ensembl biomart gene types
+biomart.biotypes <- read_tsv("~/Resources/Ensembl_94/mondom5_gene_biotypes_bioMart_Ens94_210503.txt", col_names = c("Ensembl", "associated_gene_biotype", "associated_gene"), skip = 1)
+
+sum(is.na(biomart.biotypes))
+
+biomart.biotypes$associated_gene[is.na(biomart.biotypes$associated_gene)] <- biomart.biotypes$Ensembl[is.na(biomart.biotypes$associated_gene)]
+
+length(unique(biomart.biotypes$associated_gene))
+nrow(biomart.biotypes)
+
+## Very few genes have two Ensembl IDs and thus biotypes (mostly lncRNAs) -> for simplicity, let's keep the first only:
+biomart.biotypes <- group_by(biomart.biotypes, associated_gene) %>%
+  summarise(Ensembl= Ensembl[1], associated_gene_biotype= associated_gene_biotype[1]) %>%
+  ungroup()
+
+## Collaping temrs into more useful categories
+sort(table(biomart.biotypes$associated_gene_biotype), decreasing = T)
+
+biomart.biotypes$associated_gene_biotype[biomart.biotypes$associated_gene_biotype %in% c("lincRNA", "bidirectional_promoter_lncRNA", "lncRNA", "antisense")] <- "lncRNA"
+biomart.biotypes$associated_gene_biotype[biomart.biotypes$associated_gene_biotype %in% c("miRNA", "snoRNA", "snRNA")] <- "smallRNA"
+biomart.biotypes$associated_gene_biotype[!(biomart.biotypes$associated_gene_biotype %in% c("protein_coding", "lncRNA", "smallRNA"))] <- "other"
+
+table(biomart.biotypes$associated_gene_biotype)
+
+peaks <- left_join(peaks, select(biomart.biotypes, associated_gene, associated_gene_biotype))
+table(peaks$associated_gene_biotype)
+table(peaks$associated_gene_biotype)
+peaks$associated_gene_biotype[grepl("XLOC", peaks$associated_gene)] <- "lncRNA"
+peaks$associated_gene_biotype[peaks$genomic_class_broad=="Distal"] <- NA
+
+peaks$genomic_class <- paste(peaks$associated_gene_biotype, peaks$genomic_class_broad, sep =  "-")
+peaks$genomic_class <- gsub("^NA-", "", peaks$genomic_class)
+table(peaks$genomic_class)
+peaks$genomic_class[peaks$genomic_class=="Promoter"] <- "other-Promoter"
+peaks$genomic_class[peaks$genomic_class=="Exonic"] <- "other-Exonic"
+peaks$genomic_class[peaks$genomic_class=="Intronic"] <- "other-Intronic"
+
+table(peaks$genomic_class)
+table(peaks$genomic_class_broad)
+```
+
+## Identification of conserved peaks with mouse
+
+We will apply two-way liftover to look for syntenic alignments and we will keep reciprocal best matches.
+
+We will use all peaks and subsequently focus the analysis on robust peaks.
+
+To use liftover, we have to revert chromosome coordinates for opossum to the original annotation (check 000_prep_annotation if you don't know what this means):
+
+```{r}
+chr_cut <- 536141000
+
+peak.bed.rejoin <- peak.bed
+peak.bed.rejoin$start[peak.bed.rejoin$chr %in% c("chr1b", "chr2b")] <- peak.bed.rejoin$start[peak.bed.rejoin$chr %in% c("chr1b", "chr2b")] + chr_cut
+
+peak.bed.rejoin$end[peak.bed.rejoin$chr %in% c("chr1b", "chr2b")] <- peak.bed.rejoin$end[peak.bed.rejoin$chr %in% c("chr1b", "chr2b")] + chr_cut
+
+peak.bed.rejoin$chr[peak.bed.rejoin$chr == "chr1b"] <- "chr1"
+peak.bed.rejoin$chr[peak.bed.rejoin$chr == "chr2b"] <- "chr2"
+
+peak.bed.rejoin <- droplevels(peak.bed.rejoin)
+
+table(peak.bed.rejoin$chr)
+
+summary(peak.bed.rejoin$end - peak.bed.rejoin$start)
+
+summary(peak.bed.rejoin$end)
+
+write.table(peak.bed.rejoin, "~/Opo_Cereb/004_peaks/Opossum_Cerebellum_reproducible_peaks_rejoinChr.bed", col.names = F, row.names = F, sep = "\t", quote = F)
+```
+
+```{bash}
+## Parameters
+## Minimum coverage of the peak in the orthologous region in the other species
+minmatch=0.1
+## Minimum size of peaks and orthologous regions
+size=50
+
+~/Software/bin/liftOver  ~/Opo_Cereb/004_peaks/Opossum_Cerebellum_reproducible_peaks_rejoinChr.bed /home/ioansarr/Resources/liftover_chains/monDom5ToMm10.over.chain.gz -minMatch=$minmatch -multiple -minSizeQ=$size -minSizeT=$size ~/Opo_Cereb/004_peaks/opossum.peaks.overTo.mouse.unsplit.bed ~/Opo_Cereb/004_peaks/opossum.peaks.unliftedTo.mouse.unsplit.bed
+
+~/Software/bin/liftOver ~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks.bed /home/ioansarr/Resources/liftover_chains/mm10ToMonDom5.over.chain.gz -minMatch=$minmatch -multiple -minSizeQ=$size -minSizeT=$size ~/Opo_Cereb/004_peaks/mouse.peaks.overTo.opossum.bed ~/Opo_Cereb/004_peaks/mouse.peaks.unliftedTo.opossum.bed
+```
+
+We now need to split the mouse.peaks.overTo.opossum.bed file to be able to use bedtools.
+
+```{r}
+mou2opo <- read_tsv("~/Opo_Cereb/004_peaks/mouse.peaks.overTo.opossum.bed", col_names = F)
+
+table(mou2opo$X1)
+summary(mou2opo$X2)
+
+mou2opo$X1[mou2opo$X3 > chr_cut] <- paste0(mou2opo$X1[mou2opo$X3 > chr_cut], "b")
+
+table(mou2opo$X1)
+
+mou2opo$X2[mou2opo$X1 %in% c("chr1b", "chr2b")] <- mou2opo$X2[mou2opo$X1 %in% c("chr1b", "chr2b")] - chr_cut
+summary(mou2opo$X2)
+mou2opo$X2[mou2opo$X2 < 1] <- 1
+
+mou2opo$X3[mou2opo$X1 %in% c("chr1b", "chr2b")] <- mou2opo$X3[mou2opo$X1 %in% c("chr1b", "chr2b")] - chr_cut
+summary(mou2opo$X3)
+
+## Exporting
+write.table(mou2opo, "~/Opo_Cereb/004_peaks/mouse.peaks.overTo.opossum_splitChr.bed", col.names = F, row.names = F, sep = "\t", quote = F)
+```
+
+Now we can use bedtools intersect to identify liftover hits that overlap peaks:
+
+```{bash}
+cd ~/Opo_Cereb/004_peaks
+
+bedtools intersect -a opossum.peaks.overTo.mouse.unsplit.bed -b ~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks.bed -wo > opossum.peaks.overTo.mouse.In_mouse.Peaks.bed
+
+bedtools intersect -a mouse.peaks.overTo.opossum_splitChr.bed -b ~/Opo_Cereb/004_peaks/Opossum_Cerebellum_reproducible_peaks.bed -wo > mouse.peaks.overTo.opossum.In_opossum.Peaks.bed
+```
+
+Reading in overlaps:
+
+```{r}
+o2m <- read_tsv("~/Opo_Cereb/004_peaks/opossum.peaks.overTo.mouse.In_mouse.Peaks.bed", col_names = F) %>%
+  select(X4, X9, X10) %>%
+  dplyr::rename(Opossum=X4, MouseFromOpossum=X9, MouseOverlap=X10)
+
+m2o <- read_tsv("~/Opo_Cereb/004_peaks/mouse.peaks.overTo.opossum.In_opossum.Peaks.bed", col_names = F) %>%
+  select(X4, X9, X10) %>%
+  dplyr::rename(Mouse=X4, Opossum=X9, OpossumOverlap=X10)
+```
+
+Identifying reciprocal matches and quantifying the degree of their overlap.
+
+```{r}
+reciprocal <- inner_join(o2m, m2o)
+nrow(reciprocal)
+sum(reciprocal$MouseFromOpossum == reciprocal$Mouse)
+
+reciprocal <- filter(reciprocal, MouseFromOpossum == Mouse) %>%
+  select(-MouseFromOpossum)
+
+cor(reciprocal$MouseOverlap, reciprocal$OpossumOverlap)
+
+ggplot(reciprocal, aes(MouseOverlap, OpossumOverlap)) +
+  geom_point(alpha=0.05, size=0.1)
+```
+
+The two overlaps are overall quite correlated, but we also have cases of disagreement.
+
+We should select the minimum overlap between the two to be conservative.
+
+```{r}
+reciprocal$minOverlap <- sapply(1:nrow(reciprocal), function(i) min(reciprocal$MouseOverlap[i], reciprocal$OpossumOverlap[i]))
+
+summary(reciprocal$minOverlap)
+
+hist(reciprocal$minOverlap, breaks = 50)
+
+nrow(reciprocal)
+sum(reciprocal$minOverlap >= 50)
+sum(reciprocal$minOverlap >= 50)/nrow(reciprocal)
+```
+
+Keeping overlaps of at least 50 bp (10% of the peak)
+
+```{r}
+reciprocal <- filter(reciprocal, minOverlap >= 50)
+```
+
+How many matches do we get per peak?
+
+```{r}
+nrow(reciprocal)
+length(unique(reciprocal$Opossum))
+length(unique(reciprocal$Mouse))
+
+opossum.counts <- group_by(reciprocal, Opossum) %>%
+  dplyr::count()
+
+table(opossum.counts$n)
+
+mouse.counts <- group_by(reciprocal, Mouse) %>%
+  dplyr::count()
+
+table(mouse.counts$n)
+```
+
+Reciprocal 1:1
+
+```{r}
+reciprocal.one2one <- filter(reciprocal,
+                             Opossum %in% opossum.counts$Opossum[opossum.counts$n == 1],
+                             Mouse %in% mouse.counts$Mouse[mouse.counts$n==1]
+                             )
+
+nrow(reciprocal.one2one)
+nrow(reciprocal.one2one)/nrow(reciprocal)
+```
+
+75% of the matches are in clear 1:1 relationship.
+
+However, we might stil have 1:2 relationships where we have broader peaks that are split in 500bp windows. We can "rescue" some of these by assigning them to the peak with the highest overlap.
+
+```{r}
+## Getting coordinates from peaks
+mou.comp <- do.call(rbind, sapply(reciprocal$Mouse, function(x) str_split(x, "_")))
+reciprocal$mou_chr <- mou.comp[,1]
+reciprocal$mou_start <- as.numeric(mou.comp[,2])
+reciprocal$mou_end <- as.numeric(mou.comp[,3])
+
+## Now grouping by opossum peak and keeping best overlap:
+reciprocal.bestMatch <- group_by(reciprocal, Opossum) %>%
+  summarise(bestOverlap=max(minOverlap),
+            nMatches=n_distinct(Mouse),
+            nChr=n_distinct(mou_chr),
+            maxDist=max(mou_start)-min(mou_end),
+            Mouse=Mouse[which.max(minOverlap)])
+
+nrow(reciprocal.bestMatch)
+nrow(reciprocal.one2one)
+nrow(reciprocal)
+
+nrow(reciprocal.bestMatch)/nrow(reciprocal)
+
+table(reciprocal.bestMatch$nChr)
+reciprocal.bestMatch[reciprocal.bestMatch$nChr > 1, ]
+## We should definitely remove these few cases!
+## It's also a good QC metric that we have so few matches in multiple chromosomes!
+
+reciprocal.bestMatch$maxDist[reciprocal.bestMatch$nMatches==1] <- NA
+summary(reciprocal.bestMatch$maxDist[reciprocal.bestMatch$nChr == 1])
+
+hist(log10(reciprocal.bestMatch$maxDist[reciprocal.bestMatch$nChr == 1]))
+
+sum(na.omit(reciprocal.bestMatch$maxDist[reciprocal.bestMatch$nChr == 1]) > 500)
+```
+
+Keeping only matches in the same chromosome and up to 500 bp from each other:
+
+```{r}
+reciprocal.bestMatch <- filter(reciprocal.bestMatch,
+                               nChr==1,
+                               maxDist < 500 | is.na(maxDist)==T)
+
+nrow(reciprocal.bestMatch)
+nrow(reciprocal.bestMatch)/nrow(reciprocal)
+```
+
+Now we just need to check whether we still have multiple matches from the other side:
+
+```{r}
+mouse.counts.bM <- group_by(reciprocal.bestMatch, Mouse) %>%
+  dplyr::count()
+
+table(mouse.counts.bM$n)
+
+## We still have some cases. We need to repeat from the mouse side!
+opo.comp <- do.call(rbind, sapply(reciprocal.bestMatch$Opossum, function(x) str_split(x, "_")))
+reciprocal.bestMatch$opo_chr <- opo.comp[,1]
+reciprocal.bestMatch$opo_start <- as.numeric(opo.comp[,2])
+reciprocal.bestMatch$opo_end <- as.numeric(opo.comp[,3])
+
+reciprocal.bestMatch.v2 <- group_by(reciprocal.bestMatch, Mouse) %>%
+  summarise(minOverlap=max(bestOverlap),
+            nMatches=n_distinct(Opossum),
+            nChr=n_distinct(opo_chr),
+            maxDist=max(opo_start)-min(opo_end),
+            Opossum=Opossum[which.max(bestOverlap)])
+
+nrow(reciprocal.bestMatch.v2)/nrow(reciprocal)
+
+table(reciprocal.bestMatch.v2$nChr)
+reciprocal.bestMatch.v2[reciprocal.bestMatch.v2$nChr > 1, ]
+
+reciprocal.bestMatch.v2$maxDist[reciprocal.bestMatch.v2$nMatches==1] <- NA
+summary(reciprocal.bestMatch.v2$maxDist[reciprocal.bestMatch.v2$nChr == 1])
+
+hist(reciprocal.bestMatch.v2$maxDist[reciprocal.bestMatch.v2$nChr == 1])
+
+sum(na.omit(reciprocal.bestMatch.v2$maxDist[reciprocal.bestMatch.v2$nChr == 1]) > 500)
+```
+
+```{r}
+reciprocal.bestMatch.final <- filter(reciprocal.bestMatch.v2,
+                               nChr==1,
+                               maxDist < 500 | is.na(maxDist)==T)
+
+
+nrow(reciprocal.bestMatch.final)
+length(unique(reciprocal.bestMatch.final$Mouse))
+length(unique(reciprocal.bestMatch.final$Opossum))
+
+nrow(reciprocal.bestMatch.final)/nrow(reciprocal)
+```
+
+86% of our reciprocal matches can be classified as 1:1 if we keep the best match allowing for the 2nd match to be up to 500bp away.
+
+We can export these tables
+
+```{r}
+write_tsv(select(reciprocal.one2one, Opossum, Mouse, minOverlap), "~/Opo_Cereb/004_peaks/Opossum-Mouse.reciprocal.one2one.txt")
+write_tsv(select(reciprocal.bestMatch.final, Opossum, Mouse, minOverlap), "~/Opo_Cereb/004_peaks/Opossum-Mouse.reciprocal.bestMatch.txt")
+write_tsv(select(reciprocal, Opossum, Mouse, minOverlap), "~/Opo_Cereb/004_peaks/Opossum-Mouse.reciprocal.AllMatches.txt")
+```
+
+Also adding the mouse peak to the opossum peak annotation (using the best-match catalog)
+
+```{r}
+peaks <- select(reciprocal.bestMatch.final, Opossum, Mouse) %>%
+  dplyr::rename(peak=Opossum, mouse_peak=Mouse) %>%
+  right_join(peaks)
+
+ggplot(peaks, aes(genomic_class, fill=is.na(mouse_peak))) +
+  geom_bar(position = "fill")  +
+  geom_text(stat='count',aes(label=..count..), position = position_fill(vjust = 0.5))+
+  coord_flip()
+```
+
+As expected, protein-coding promoters and exons show the highest conservation. This is a good sanity check here.
+
+## Activity in dataset and robust peak identification
+
+Applying our standard 5% cutoff for at least one cluster
+
+```{r}
+peak_mat <- getMatrixFromProject(proj, useMatrix = "PeakMatrix")
+
+## We need to rearrange the peaks in our table to match the index of the peak matrix (chr > idx)
+sum(peaks$idx == peak_mat@elementMetadata$idx)
+
+peaks <- mutate(peaks, chr=as.character(chr)) %>%
+  arrange(chr, idx)
+
+sum(peaks$idx == peak_mat@elementMetadata$idx)
+## We are good. Now we can assign our peak names as row.names of the matrix
+rowData(peak_mat)
+
+rowData(peak_mat) <- peaks
+```
+
+Now we will estimate the frequency of cells within a cluster that show accessibility for each peak.
+
+```{r}
+clust <- sort(unique(peak_mat@colData$Clusters_finalNucSet_res1.0))
+
+peak_clust_f <- do.call(cbind, lapply(clust, function(id) {
+  cell_i <- which(peak_mat@colData$Clusters_finalNucSet_res1.0==id)
+  return(Matrix::rowSums(assay(peak_mat[,cell_i]) > 0)/length(cell_i))
+}))
+
+colnames(peak_clust_f) <- clust
+row.names(peak_clust_f) <- peak_mat@elementMetadata$peak
+```
+
+```{r}
+peaks$max_freq <- apply(peak_clust_f, 1, max)
+
+cutoff <- 0.05
+
+peaks$robust <- peaks$max_freq >= cutoff 
+
+p <- ggplot(data = NULL, aes(x=seq(1, length(peaks$max_freq), 20),y=sort(peaks$max_freq[seq(1, length(peaks$max_freq), 20)], decreasing = T), color=sort(peaks$max_freq[seq(1, length(peaks$max_freq), 20)], decreasing = T) >= cutoff )) +
+  geom_point() +
+  geom_hline(yintercept = cutoff , color="red", lty="dashed") +
+  geom_vline(xintercept = which.min(sort(peaks$max_freq, decreasing = T) >= cutoff ), color="red", lty="dashed") +
+  scale_color_manual(values = c("gray70", "deepskyblue3"), guide=F) +
+  annotate(geom="text",x=which.min(sort(peaks$max_freq, decreasing = T) >= cutoff ) - 5e4, y=0.2, label=paste0("Robust peaks\nFreq >= ",cutoff ,"\nN=", which.min(sort(peaks$max_freq, decreasing = T) >= cutoff )), color="deepskyblue3") +
+  ylab("Maximum fraction of active cells in a cluster") +
+  xlab("Peaks (decreasing maximum activity)") +
+  theme_classic()
+
+p
+
+if (dir.exists("~/Opo_Cereb/Figures/003_peakAnnotation")==F) {
+  dir.create("~/Opo_Cereb/Figures/003_peakAnnotation")
+}
+
+pdf("~/Opo_Cereb/Figures/003_peakAnnotation/Opossum_peaks_robustPeak_identification.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+Also generating pseudobulks (cell type x stage) to assess conservation of cell type-specificity:
+
+```{r}
+cell_counts <- getCellColData(proj) %>%
+  as.data.frame() %>%
+  group_by(Cell_type_broad, Timepoint) %>%
+  ## Keeping only major lineages
+  filter(Cell_type_broad != "Other") %>%
+  dplyr::count() %>%
+  mutate(sample=paste(Cell_type_broad, Timepoint, sep = "_"))
+
+## Pseudobulks to consider
+cell_counts.filtered <- filter(cell_counts, n >=100)
+
+cell_anno <- getCellColData(proj) %>%
+  as.data.frame() %>%
+  rownames_to_column("cell")
+
+pseudobulks <- do.call(cbind, parallel::mclapply(1:nrow(cell_counts.filtered), function(i){
+  cells <- cell_anno$cell[cell_anno$Cell_type_broad==cell_counts.filtered$Cell_type_broad[i] & cell_anno$Timepoint == cell_counts.filtered$Timepoint[i]]
+  pseudo <- Matrix::rowSums(assay(peak_mat[, cells]))
+  return(pseudo)
+}, mc.cores = 10))
+
+dim(pseudobulks)
+colnames(pseudobulks) <- unique(cell_counts.filtered$sample)
+row.names(pseudobulks) <- peak_mat@elementMetadata$peak
+
+## Calculating CPM values per sample
+pseudobulks.cpm <- t(t(pseudobulks)/colSums(pseudobulks) * 1e6)
+
+## Filtering for robust peaks only
+pseudobulks.cpm <- pseudobulks.cpm[peaks$peak[peaks$robust==T],]
+```
+
+We can export the information about peaks
+
+```{r}
+write_tsv(peaks, "~/Opo_Cereb/004_peaks/Opossum_Cerebellum_reproducible_peaks_summary.txt")
+
+## Updating metadata on matrix and exporting
+rowData(peak_mat) <- peaks
+saveRDS(peak_mat, "~/Opo_Cereb/004_peaks/Opossum_Cerebellum_reproducible_peak_matrix_SE_withInfo.rds")
+saveRDS(peak_mat[peak_mat@elementMetadata$robust==T], "~/Opo_Cereb/004_peaks/Opossum_Cerebellum_reproducible_peak_matrix_SE_withInfo_robustPeaks.rds")
+
+## Also exporting pseudobulks
+write.table(pseudobulks.cpm, "~/Opo_Cereb/004_peaks/Opossum_lineage_by_timepoint_pseudobulk_cpm_robust.txt", row.names = T, col.names = T, quote = F, sep = "\t")
+```
+
+```{r}
+sessionInfo()
+```

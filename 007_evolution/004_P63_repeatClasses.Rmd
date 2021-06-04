@@ -47,6 +47,9 @@ cell_i <- which(peak_mat@colData$Timepoint=="P63")
 atac.data <- assay(peak_mat[,cell_i])
 row.names(atac.data) <- peak_mat@elementMetadata$peak
 
+## Subsetting for robust intergenic peaks only
+atac.data <- atac.data[peak.info$peak[peak.info$robust==T & peak.info$genomic_class=="Distal"],]
+
 rep_counts <- do.call(rbind, lapply(major_reps, function(r) {
   peak_i <- peak.info$peak[grepl(paste0(r, "$|", r, ","), peak.info$overlappingRepFamily)]
   peak_i <- peak_i[peak_i %in% row.names(atac.data)]
@@ -96,7 +99,7 @@ p <- ggplot(filter(rep_freq.gather,Cell_type_broad %in% c("Astroglia", "GC", "In
 
 p
 
-pdf("~/Mouse_Cereb/Figures/008_conservation/TE_byCellType_P63_microglia.pdf", width = 12, height = 4, useDingbats = F); print(p); dev.off()
+pdf("~/Mouse_Cereb/Revisions/Figures/007_TE_byCellType_P63_microglia.pdf", width = 12, height = 4, useDingbats = F); print(p); dev.off()
 ```
 
 ```{r}
@@ -114,7 +117,7 @@ sort(sapply(levels(rep_freq.gather$repFamily), function(r) {
 We see that microglia are enriched for recently expanded TE classes in the mouse genome, such as B1, B2, ERV elements and L1 but not for more ancient expansions, such as MIRs, L2s and DNA repeats.
 
 ```{r}
-saveRDS(rep_freq.gather, "~/Mouse_Cereb/016_conservation_and_repeats/Mouse_Cerebellum_P63_repeatClasses_byCell.rds")
+saveRDS(rep_freq.gather, "~/Mouse_Cereb/Revisions/007_conservation_backgroundDist/Mouse_Cerebellum_P63_repeatClasses_byCell.rds")
 ```
 
 

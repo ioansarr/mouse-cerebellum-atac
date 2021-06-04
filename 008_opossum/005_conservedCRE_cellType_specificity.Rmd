@@ -1,0 +1,218 @@
+---
+title: "Mouse to opossum CRE specificity"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(RColorBrewer)
+})
+```
+
+Here we want to investigate whether conserved CREs retain the same cell type-specificities:
+
+```{r}
+opo_pseudo <- read.table("~/Opo_Cereb/004_peaks/Opossum_lineage_by_timepoint_pseudobulk_cpm_robust.txt", header = T, sep = "\t", stringsAsFactors = F)
+
+mouse_pseudo <- read.table("~/Mouse_Cereb/013_globalCREactivity/Mouse_lineage_by_timepoint_pseudobulk_cpm.txt", header = T, sep = "\t", stringsAsFactors = F)
+
+## Selecting only relevant timepoints in mouse (mouse P4 ~  opo P21  and mouse P63 ~ opo adult)
+mouse_pseudo <- mouse_pseudo[, grepl("_P04|_P63", colnames(mouse_pseudo))]
+
+## Loading CRE orthology table
+ortho_cre <- read_tsv("~/Opo_Cereb/004_peaks/Opossum-Mouse.reciprocal.bestMatch.txt")
+## Limiting to only robust peaks in both species
+nrow(ortho_cre)
+ortho_cre_rob <- filter(ortho_cre, 
+                        Mouse %in% row.names(mouse_pseudo),
+                        Opossum %in% row.names(opo_pseudo))
+
+nrow(ortho_cre_rob)
+
+peak2gene <- readRDS("~/Mouse_Cereb/Revisions/002_cre2gene_assignment/CRE_to_gene_assignment_sigInteractions.rds")
+```
+
+Subsetting to shared samples
+
+```{r}
+## Identifying samples in opossum
+opo_samples <- colnames(opo_pseudo)
+opo_samples
+
+opo_samples <- c("Astroglia_P21", "Astroglia_adult", "PC_P21", "Interneuron_P21", "Interneuron_adult", "GC_P21", "GC_adult", "UBC_P21", "Oligodendrocyte_adult", "Microglia_adult")
+opo_pseudo <- opo_pseudo[,opo_samples]
+## Converting to mouse names
+mou_samples <- gsub("adult", "P63", opo_samples)
+mou_samples <- gsub("P21", "P04", mou_samples)
+
+mouse_pseudo <- mouse_pseudo[, mou_samples]
+```
+
+
+Now we can limit our pseudobulks to the orthologous CREs:
+
+```{r, fig.width=6, fig.height=5}
+opo_pseudo.cons <- opo_pseudo[ortho_cre_rob$Opossum,]
+mouse_pseudo.cons <- mouse_pseudo[ortho_cre_rob$Mouse,]
+
+s <- cor(mouse_pseudo.cons, opo_pseudo.cons, method = "spearman")
+
+pheatmap::pheatmap(s, cluster_rows = F, cluster_cols = F)
+```
+
+Let's also subset to distal CREs only:
+
+```{r, fig.width=6, fig.height=5}
+mouse_peaks <- read_tsv("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt")
+mouse_peaks <- filter(mouse_peaks, robust==T)
+
+opo_peaks <- read_tsv("~/Opo_Cereb/004_peaks/Opossum_Cerebellum_reproducible_peaks_summary.txt")
+opo_peaks <- filter(opo_peaks, robust==T)
+
+ortho_cre_rob_dist <- filter(ortho_cre_rob,
+                             Mouse %in% mouse_peaks$peak[mouse_peaks$genomic_class_broad %in% c("Distal") & mouse_peaks$robust==T],
+                             Opossum %in% opo_peaks$peak[opo_peaks$genomic_class_broad %in% c("Distal") & opo_peaks$robust==T])
+
+opo_pseudo.cons.dist <- opo_pseudo[ortho_cre_rob_dist$Opossum,]
+mouse_pseudo.cons.dist <- mouse_pseudo[ortho_cre_rob_dist$Mouse,]
+
+s.dist <- cor(mouse_pseudo.cons.dist, opo_pseudo.cons.dist, method = "spearman")
+
+pheatmap::pheatmap(s.dist, cluster_rows = F, cluster_cols = F)
+
+draw(Heatmap(matrix = t(s.dist),
+        cluster_rows =F,
+        cluster_columns = F,
+        show_row_names = T,
+        border = TRUE,
+        col = colorRampPalette(rev(brewer.pal(n=9,name = "RdBu")))(20),
+        heatmap_legend_param = list( title = "Spearman's rho")), heatmap_legend_side = "left", annotation_legend_side = "right")
+```
+
+```{r}
+pdf("~/Mouse_Cereb/Revisions/Figures/009_Mouse_opossum_intergenicCREonly_Spearman_rho.pdf", width=6, height = 5, useDingbats = F);draw(Heatmap(matrix = t(s.dist),
+        cluster_rows =F,
+        cluster_columns = F,
+        show_row_names = T,
+        border = TRUE,
+        col = colorRampPalette(rev(brewer.pal(n=9,name = "RdBu")))(20),
+        heatmap_legend_param = list( title = "Spearman's rho")), heatmap_legend_side = "left", annotation_legend_side = "right") ; dev.off()
+```
+
+
+```{r, fig.width=4, fig.height=3}
+c <- diag(cor(t(opo_pseudo[ortho_cre_rob_dist$Opossum,]), t(mouse_pseudo[ortho_cre_rob_dist$Mouse,])))
+
+c_shuffled <- diag(cor(t(mouse_pseudo[ortho_cre_rob_dist$Mouse,]), t(opo_pseudo[sample(ortho_cre_rob_dist$Opossum, length(ortho_cre_rob_dist$Opossum), replace = F),])))
+
+hist(c)
+hist(c_shuffled)
+
+df <- data.frame(cor=c(c, c_shuffled),
+                 type=c(rep("ortholog", length(c)), rep("shuffled", length(c_shuffled))),
+                 stringsAsFactors = F)
+
+
+p <- ggplot(df, aes(cor, fill=type, color=type)) +
+  geom_density(alpha=0.2, lwd=0.8) +
+  scale_fill_manual(values = c("deepskyblue3", "darkorange")) +
+  scale_color_manual(values = c("deepskyblue3", "darkorange")) +
+  xlab("Pearson's correlation") +
+  theme_classic()
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/009_Mouse_opossum_intergenicCREonly_Pearsons_acrossStages.pdf", width=4, height = 3, useDingbats = F);print(p); dev.off()
+```
+
+Exporting the correlations
+
+```{r}
+ortho_cre_rob_dist$correlation <- c
+
+write_tsv(ortho_cre_rob_dist, "~/Mouse_Cereb/Revisions/009_opossum_comparisons/Mouse_opossum_orthoCREs_intergenicInBoth_withCorr.txt")
+```
+
+Also giving general estimates of conservation.
+
+Here it's important to only consider mouse CREs that are active in stages and cell types with correspondence to our targeted opossum dataset.
+
+We can use our pseudobulks and ask for mouse CREs reaching at least 5 CPM in at least one sample (with a corresponding opossum sample):
+
+```{r}
+mouse_peaks_expr <- filter(mouse_peaks, peak %in% row.names(mouse_pseudo)[rowSums(mouse_pseudo >= 5) > 0])
+
+mou2opo <- read_tsv("~/Opo_Cereb/004_peaks/mouse.peaks.overTo.opossum.bed", col_names = F)
+
+mouse_peaks_expr$conservation <- ifelse(mouse_peaks_expr$peak %in% ortho_cre$Mouse, yes = "conserved-activity", no = ifelse(mouse_peaks_expr$peak %in% mou2opo$X4, yes = "conserved-sequence", no = "mouse-specific"))
+table(mouse_peaks_expr$conservation)
+
+## All robust mouse peaks
+table(mouse_peaks$genomic_class_broad)/nrow(mouse_peaks)
+## Mouse peaks expressed in corresponding stages in opossum
+table(mouse_peaks_expr$genomic_class_broad)/nrow(mouse_peaks_expr)
+## Mouse peaks expressed in corresponding stages and with conserved sequence in opossum
+table(mouse_peaks_expr$genomic_class_broad[mouse_peaks_expr$conservation!="mouse-specific"])/nrow(mouse_peaks_expr[mouse_peaks_expr$conservation!="mouse-specific",])
+## Mouse peaks expressed in corresponding stages and with conserved activity in opossum
+table(mouse_peaks_expr$genomic_class_broad[mouse_peaks_expr$conservation=="conserved-activity"])/nrow(mouse_peaks_expr[mouse_peaks_expr$conservation=="conserved-activity",])
+
+mouse_stats <- group_by(mouse_peaks, genomic_class_broad) %>%
+  summarise(
+    all=n(),
+    expr=sum(peak %in% mouse_peaks_expr$peak),
+    seq_cons=sum(peak %in% mouse_peaks_expr$peak[mouse_peaks_expr$conservation!="mouse-specific"]),
+    act_cons=sum(peak %in% mouse_peaks_expr$peak[mouse_peaks_expr$conservation=="conserved-activity"])) %>% gather(-genomic_class_broad, key = "type", value = "n") %>%
+  mutate(type=factor(type, levels = rev(c("all", "expr", "seq_cons", "act_cons"))),
+         genomic_class_broad=factor(genomic_class_broad, levels = rev(c("Promoter", "Exonic", "Intronic", "Distal"))))
+
+mouse_stats <- group_by(mouse_stats, type) %>%
+  mutate(f=round(n/sum(n), digits = 3) * 100) %>%
+  ungroup()
+
+ggplot(mouse_stats, aes(x=type, y=n, fill=genomic_class_broad)) +
+  geom_col() +
+  geom_text(aes(label=paste0(f, "%")), position = position_stack(vjust = 0.5)) +
+  scale_fill_manual(values = c("darkorange2",  "darkolivegreen3","deepskyblue3","darkorchid"))+
+  coord_flip() +
+  theme_classic()
+
+p1 <- ggplot(mouse_stats, aes(x=type, y=n, fill=genomic_class_broad)) +
+  geom_col(position = "fill") +
+  geom_text(aes(label=n), position = position_fill(vjust = 0.5)) +
+  scale_fill_manual(values = c("darkorange2",  "darkolivegreen3","deepskyblue3","darkorchid"))+
+  ylab("Fraction") +
+  coord_flip() +
+  theme_classic()
+
+p1
+
+mouse_stats_agr <- group_by(mouse_stats, type) %>%
+  summarise(n=sum(n))
+
+p2 <- ggplot(mouse_stats_agr, aes(x=type, y=n)) +
+  geom_col(fill="gray70") +
+  geom_text(aes(label=n), position = position_identity()) +
+  ylab("Count") +
+  coord_flip() +
+  theme_classic()
+
+p2
+
+gridExtra::grid.arrange(p1, p2, nrow=1, widths=c(2, 1))
+
+
+pdf("~/Mouse_Cereb/Revisions/Figures/009_Mouse_Peaks_conservedInOpossum.pdf", width=8, height = 3, useDingbats = F);gridExtra::grid.arrange(p1, p2, nrow=1, widths=c(2, 1)); dev.off()
+
+ggplot(filter(mouse_peaks_expr, genomic_class=="Distal"), aes(x=conservation, y=meanPhastCons_100bp)) +
+  geom_violin() +
+  geom_boxplot(width=0.05, notch = T, outlier.alpha = 0) +
+  theme_classic()
+```
+
+```{r}
+sessionInfo()
+```
+
