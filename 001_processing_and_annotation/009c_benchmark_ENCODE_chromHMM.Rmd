@@ -1,0 +1,187 @@
+---
+title: "Mouse Cerebellum - Benchmarking peaks with external datasets - ENCODE chromHMM"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+})
+```
+
+```{r}
+peaks <- read.table("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt", header = T, sep = "\t", stringsAsFactors = F)
+```
+
+Here we are comparing our peak set to other datasets from ENCODE.
+
+We are limiting ourselves to the robust peaks (at least 5% in at least one cluster), which are also the peaks we are using in our analyses:
+
+```{r, eval=FALSE}
+peak.bed <- filter(peaks, robust==T) %>%
+  dplyr::select(chr, start, end, peak)
+
+write.table(peak.bed, "~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_robust.bed",col.names = F, row.names = F, sep = "\t", quote = F)
+```
+
+Comparing with ENCODE chromHMM annotations:
+
+```{r}
+metadata <- read_tsv("~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/metadata.txt")
+
+table(metadata$`File Status`)
+
+table(metadata$Organism)
+
+table(metadata$`Life stage`)
+
+table(metadata$`Age units`[metadata$`Life stage`!="adult"])
+table(metadata$`Age units`[metadata$`Life stage`=="adult"])
+table(metadata$Age[metadata$`Life stage`=="adult"])
+
+metadata[metadata$`Life stage`=="adult" & metadata$Age==24,]
+
+sort(table(metadata$`Biosample term name`), decreasing = T)
+```
+
+Let's see the coverage across tissue types
+
+```{r}
+metadata$devStage <- sapply(1:nrow(metadata), function(x) ifelse(metadata$`Life stage`[x] == "embryonic", yes = paste0("e", metadata$Age[x]), no = ifelse(metadata$`Life stage`[x] == "postnatal", yes = paste0("P", metadata$Age[x]), no = "P56")))
+
+metadata_counts <- filter(metadata,(`Life stage`=="adult" & Age==24)==F)%>%
+  group_by(`Biosample term name`, devStage) %>%
+  dplyr::count() %>%
+  spread(key = devStage, value = n, fill = 0)%>%
+  as.data.frame()
+
+row.names(metadata_counts) <- metadata_counts$`Biosample term name`
+
+pheatmap::pheatmap(metadata_counts[,2:ncol(metadata_counts)])
+```
+
+Let's get the tiles and overlap them with our peaks:
+
+```{r, eval=FALSE}
+x <- fread("~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/ENCFF008GTF.bed.gz", header = F)
+
+chromHMM_bed <- x[,1:3]
+chromHMM_bed$name <- paste(chromHMM_bed$V1, chromHMM_bed$V2, chromHMM_bed$V3, sep = "_")
+
+write_tsv(chromHMM_bed, "~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/chromHMM_tiles.bed", col_names = F)
+```
+
+Now overlapping with our peaks
+
+```{bash, eval=FALSE}
+bedtools intersect -a ~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_robust.bed -b ~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/chromHMM_tiles.bed -wa -wb > ~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/Mouse_Cerebellum_peaks_final_chromHMM_tiles.txt
+```
+
+Now we can try to construct an activity table
+
+```{r, eval=FALSE}
+chromHMM_overlaps <- fread("~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/Mouse_Cerebellum_peaks_final_chromHMM_tiles.txt", header = F) %>%
+  dplyr::select(V4, V8) %>%
+  dplyr::rename(peak = V4, chromHMM = V8)
+
+
+enc <- list.files("~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/", pattern = ".bed.gz")
+
+lapply(enc, function(f) {
+  enc_f <- fread(paste0("~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/",f), header = F) %>% 
+    mutate(chromHMM = paste(V1, V2, V3, sep = "_")) %>%
+    select(chromHMM, V4)
+  colnames(enc_f)[2] <- gsub(".bed.gz","",f)
+  chromHMM_overlaps <<- left_join(chromHMM_overlaps, enc_f)
+  print(paste0("Done with file: ", f))
+})
+
+saveRDS(chromHMM_overlaps, "~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/Mouse_Cerebellum_peaks_final_chromHMM_tiles_activity.rds")
+```
+
+Doing the same without requiring overlap with our peaks (for example to test enrichment in our dataset)
+
+```{r, eval=FALSE}
+enc <- list.files("~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/", pattern = ".bed.gz")
+
+chromHMM_stats <- Reduce(full_join, lapply(enc, function(f) {
+  enc_f <- fread(paste0("~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/",f), header = F) %>% 
+    mutate(chromHMM = paste(V1, V2, V3, sep = "_")) %>%
+    select(chromHMM, V4)
+  colnames(enc_f)[2] <- gsub(".bed.gz","",f)
+  print(paste0("Done with file: ", f))
+  return(enc_f)
+}))
+
+dim(chromHMM_stats)
+
+saveRDS(chromHMM_stats, "~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/chromHMM_tiles_all_activity.rds")
+```
+
+Let's see if our tiles overlap peaks
+
+```{r}
+chromHMM_stats <- readRDS("~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/chromHMM_tiles_all_activity.rds")
+
+chromHMM_overlaps <- readRDS("~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/Mouse_Cerebellum_peaks_final_chromHMM_tiles_activity.rds")
+
+chromHMM_sample_stats <- Reduce(bind_rows, lapply(colnames(chromHMM_stats)[2:length(colnames(chromHMM_stats))], function(s) {
+  df_total <- as.data.frame(table(chromHMM_stats[,s])) 
+  df_total$class <- "total"
+  df_peaks <- as.data.frame(table(chromHMM_stats[chromHMM_stats$chromHMM %in% unique(chromHMM_overlaps$chromHMM),s])) 
+  df_peaks$class <- "peaks"
+  df_all <- Reduce(bind_rows, list(df_total, df_peaks))
+  df_all$samples <- s
+  print(paste0("Done with sample", s))
+  return(df_all)
+}))
+
+chromHMM_sample_stats <- dplyr::select(metadata, `File accession`, `Biosample term name`, devStage) %>%
+  dplyr::rename(samples=`File accession`, tissue = `Biosample term name`) %>%
+  right_join(chromHMM_sample_stats)
+
+saveRDS(chromHMM_sample_stats, "~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/chromHMM_tiles_categories_overlappingPeaks_stats.rds")
+```
+
+Fraction of peaks in each set recovered in our annotation:
+
+```{r}
+chromHMM_sample_stats <- readRDS("~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/chromHMM_tiles_categories_overlappingPeaks_stats.rds")
+
+chromHMM_enh_strong_stats <- filter(chromHMM_sample_stats, Var1=="Enh") %>%
+  group_by(tissue, devStage) %>%
+  summarise(peak_fraction=Freq[class=="peaks"]/Freq[class=="total"]) %>%
+  spread(key = devStage, value = peak_fraction, fill = NA) %>%
+  as.data.frame()
+
+row.names(chromHMM_enh_strong_stats) <- chromHMM_enh_strong_stats$tissue
+
+pheatmap::pheatmap(chromHMM_enh_strong_stats[,2:ncol(chromHMM_enh_strong_stats)], cluster_cols = F, main="Fraction of chromHMM strong enhancers overlapping putative cerebellum CREs")
+
+pheatmap::pheatmap(chromHMM_enh_strong_stats[,2:ncol(chromHMM_enh_strong_stats)], cluster_cols = F, main = "Fraction of chromHMM strong enhancers overlapping putative cerebellum CREs", filename = "~/Mouse_Cereb/Figures/003_peakAnnotation/Encode_chromHMM_enh_strong_overlap_withPeaks.pdf", width = 6, height = 4, cellwidth = 20, cellheight = 20, fontsize = 8)
+```
+
+Finally, checking for heterochromatin
+
+```{r}
+chromHMM_hetero_stats <- filter(chromHMM_sample_stats, grepl("Het",Var1)) %>%
+  group_by(tissue, devStage) %>%
+  summarise(peak_fraction=sum(Freq[class=="peaks"])/sum(Freq[class=="total"])) %>%
+  spread(key = devStage, value = peak_fraction, fill = NA) %>%
+  as.data.frame()
+
+row.names(chromHMM_hetero_stats) <- chromHMM_hetero_stats$tissue
+
+pheatmap::pheatmap(chromHMM_hetero_stats[,2:ncol(chromHMM_hetero_stats)], cluster_cols = F, main = "Fraction of chromHMM heterochromatin overlapping putative cerebellum CREs")
+
+pheatmap::pheatmap(chromHMM_hetero_stats[,2:ncol(chromHMM_hetero_stats)], cluster_cols = F, main = "Fraction of chromHMM heterochromatin overlapping putative cerebellum CREs", filename = "~/Mouse_Cereb/Figures/003_peakAnnotation/Encode_chromHMM_heterochromatin_overlap_withRobustPeaks.pdf", width = 6, height = 4, cellwidth = 20, cellheight = 20, fontsize = 8)
+```
+
+We see that our peaks are enriched for strong enhancers in the nervous tissues (in particular hindbrain) and depleted of heterochromatic regions (again in particular for nervous tissues).
+
+```{r}
+sessionInfo()
+```
+
+

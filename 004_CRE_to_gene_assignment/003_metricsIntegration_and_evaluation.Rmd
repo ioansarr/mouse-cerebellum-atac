@@ -1,0 +1,343 @@
+---
+title: "CRE to gene assignment: Integrating metrics"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(GenomicRanges)
+  library(SummarizedExperiment)
+  library(VennDiagram)
+  library(viridis)
+})
+```
+
+Loading previously estimated correlations
+
+```{r}
+## True correlations
+prom2peak.correlations <- readRDS("~/Mouse_Cereb/Revisions/002_cre2gene_assignment/001_promoter-peak_Correlations_robustDistalOnly.rds")
+gene2peak.correlations <- readRDS("~/Mouse_Cereb/Revisions/002_cre2gene_assignment/002_gene-peak_Correlations_robustDistalOnly.rds")
+
+## Null correlations (intrachromosomal per gene/promoter)
+prom_null_corr <- readRDS("~/Mouse_Cereb/Revisions/002_cre2gene_assignment/001_promoter-peak_nullCorrelations_robustDistalOnly.rds")
+gene_null_corr <- readRDS("~/Mouse_Cereb/Revisions/002_cre2gene_assignment/002_gene-peak_nullCorrelations_robustDistalOnly.rds")
+```
+
+Integrating both metrics
+
+```{r}
+prom2peak.correlations <- as.data.frame(prom2peak.correlations)
+
+head(prom2peak.correlations)
+
+cre2gene <- dplyr::select(prom2peak.correlations, -queryHits, -subjectHits) %>%
+  dplyr::rename(chr=seqnames, promoterCorrelation=correlation) %>%
+  left_join(dplyr::select(gene2peak.correlations,
+                          prom, peak, gene, geneScoreCorrelation)) %>%
+  group_by(gene, peak, chr, geneScoreCorrelation) %>%
+  summarise(promoterCorrelation=max(promoterCorrelation),
+            prom=prom[which.max(promoterCorrelation)]) 
+```
+
+Also incorporating distance (and only testing when peak at least 1,000 bp away from promoter):
+
+```{r}
+peak_coord <- str_split(cre2gene$peak, "_", simplify = T)
+prom_coord <- str_split(cre2gene$prom, "_", simplify = T)
+
+dist <- ifelse(as.numeric(prom_coord[,2]) > as.numeric(peak_coord[,3]), yes = as.numeric(prom_coord[,2])-as.numeric(peak_coord[,3]), no = as.numeric(peak_coord[,2])- as.numeric(prom_coord[,3]))
+
+summary(dist)
+
+sum(dist < 1000)
+
+cre2gene$distance <- dist
+
+cre2gene <- filter(cre2gene, distance > 1000)
+
+```
+
+
+```{r}
+cor(cre2gene$geneScoreCorrelation, cre2gene$promoterCorrelation)
+
+ggplot(cre2gene, aes(x=promoterCorrelation, y=geneScoreCorrelation)) +
+  geom_point(alpha=0.1, size=0.1)
+
+ggplot(cre2gene, aes(x=cut(promoterCorrelation, breaks = round(seq(min(promoterCorrelation), max(promoterCorrelation),by = 0.1), digits = 1)), y=geneScoreCorrelation)) +
+  geom_boxplot(notch = T) +
+  theme(axis.text.x = element_text(angle=45, hjust=0.9))
+```
+
+We see that the two metrics are reasonably correlated but still complementary to each other. Therefore, it's reasonable to consider both.
+
+```{r}
+cre2gene$prom_pval <- pnorm(cre2gene$promoterCorrelation,
+        mean = mean(prom_null_corr$null_mean),
+        sd = mean(prom_null_corr$null_sd),
+        lower.tail = F)
+
+hist(cre2gene$prom_pval, breaks = 50)
+
+## Adjust for multiple testing
+cre2gene$prom_padj <- p.adjust(cre2gene$prom_pval, method = "BH")
+
+max(cre2gene$prom_padj[cre2gene$promoterCorrelation >= 0.15])
+```
+We start with a lenient cutoff for promoter-coaccessibility (cor >= 0.15):
+
+```{r}
+set.seed(1)
+df_prom.plot <- data.frame(type=c(rep("250 Kb window", length(cre2gene$promoterCorrelation)),
+                             rep("interchromosomal", length(cre2gene$promoterCorrelation))),
+                      correlation=c(
+                        cre2gene$promoterCorrelation,
+                        rnorm(
+                          length(cre2gene$promoterCorrelation),
+                          mean = mean(prom_null_corr$null_mean),
+                          sd = mean(prom_null_corr$null_sd))))
+ 
+p <- ggplot(df_prom.plot, aes(correlation, fill=type, color=type)) +
+  geom_density(alpha=0.2) +
+  geom_vline(xintercept = 0.15, lty="dashed", color="red") +
+  scale_fill_manual(values = c("forestgreen", "mediumorchid"), name="") +
+  scale_color_manual(values = c("forestgreen", "mediumorchid"), name="") +
+  annotate(geom="text",x=0.2, y=3, label="r=0.15\nFDR<0.40", color="red", hjust=0) +
+  xlab("Promoter correlation") +
+  theme_classic()
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/002_cregene_promCorrelations.pdf", width = 5, height = 3, useDingbats = F); print(p); dev.off()
+```
+
+```{r}
+cre2gene.promHigh <- filter(cre2gene, promoterCorrelation >= 0.15)
+
+nrow(cre2gene.promHigh)
+length(unique(cre2gene.promHigh$gene))
+length(unique(cre2gene.promHigh$peak))
+```
+
+Now adding p-values for geneScore correlations based on the null distributions:
+
+```{r}
+cre2gene.promHigh <- left_join(cre2gene.promHigh, 
+                               dplyr::rename(gene_null_corr,
+                                             gene_null_mean=null_mean,
+                                             gene_null_sd=null_sd))
+
+cre2gene.promHigh$gene_pval <- pnorm(cre2gene.promHigh$geneScoreCorrelation,
+        mean = mean(gene_null_corr$null_mean),
+        sd = mean(gene_null_corr$null_sd),
+        lower.tail = F)
+
+hist(cre2gene.promHigh$gene_pval)
+
+cre2gene.promHigh$gene_padj <- p.adjust(cre2gene.promHigh$gene_pval, method = "BH")
+
+sum(cre2gene.promHigh$gene_padj < 0.05)
+
+summary(cre2gene.promHigh$geneScoreCorrelation[cre2gene.promHigh$gene_padj < 0.05])
+
+cre2gene.final <- filter(cre2gene.promHigh, gene_padj < 0.05)
+```
+
+Plotting distributions
+
+```{r}
+df.plot <- data.frame(type=c(rep("250 Kb window", length(cre2gene.promHigh$geneScoreCorrelation)),
+                             rep("interchromosomal", length(cre2gene.promHigh$geneScoreCorrelation))),
+                      correlation=c(
+                        cre2gene.promHigh$geneScoreCorrelation,
+                        rnorm(
+                          length(cre2gene.promHigh$geneScoreCorrelation),
+                          mean = mean(gene_null_corr$null_mean),
+                          sd = mean(gene_null_corr$null_sd))))
+ 
+
+gScorCutoff <- round(min(cre2gene.final$geneScoreCorrelation), digits = 2)
+
+p <- ggplot(df.plot, aes(correlation, fill=type, color=type)) +
+  geom_density(alpha=0.2) +
+  geom_vline(xintercept = gScorCutoff, lty="dashed", color="red") +
+  scale_fill_manual(values = c("forestgreen", "mediumorchid"), name="") +
+  scale_color_manual(values = c("forestgreen", "mediumorchid"), name="") +
+  annotate(geom="text",x=0.6, y=1.6, label=paste0("r=", gScorCutoff, "\nFDR<0.05"), color="red", hjust=0) +
+  xlab("Gene score correlation") +
+  theme_classic()
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/002_cre2gene_geneCorrelations.pdf", width = 5, height = 3, useDingbats = F); print(p); dev.off()
+```
+
+```{r}
+nrow(cre2gene.final)
+length(unique(cre2gene.final$gene))
+length(unique(cre2gene.final$peak))
+
+min(cre2gene.final$geneScoreCorrelation)
+
+geneCounts <- group_by(cre2gene.final, peak) %>%
+  dplyr::count() %>%
+  arrange(desc(n))
+
+summary(geneCounts$n)
+sum(geneCounts$n)
+```
+
+Assigning to gene with highest correlation (geneScore * promoter)
+
+```{r}
+cre2gene.final.nR <- mutate(cre2gene.final,
+                            interactionScore = geneScoreCorrelation * promoterCorrelation) %>%
+  group_by(peak) %>%
+  filter(interactionScore==max(interactionScore))
+
+cre2gene.final <- cre2gene.final.nR
+
+nrow(cre2gene.final)
+length(unique(cre2gene.final$gene))
+length(unique(cre2gene.final$peak))
+```
+
+Using published Hi-C data (Bonev 2017) to assess the confidence of our interactions
+
+```{r}
+cre2gene$sig.interaction <- paste(cre2gene$peak, cre2gene$gene, sep = ":") %in% paste(cre2gene.final$peak, cre2gene.final$gene, sep = ":")
+
+table(cre2gene$sig.interaction)
+```
+
+
+```{r}
+NPC_tads <- readxl::read_excel("~/Resources/Bonev_2017_HiC/Bonev_ST2_compartments.xlsx", sheet = "ncx NPC")
+
+NPC_tads.gr <- GRanges(seqnames = NPC_tads$chrom,
+              ranges = IRanges(
+                start = NPC_tads$start,
+                end = NPC_tads$end))
+
+mcols(NPC_tads.gr)$tad <- paste(NPC_tads$chrom, NPC_tads$start, NPC_tads$end, sep = "_")
+mcols(NPC_tads.gr)$compartment <- NPC_tads$Compartment
+
+tested_peaks <- peak.info[peak.info$peak %in% union(cre2gene$peak, cre2gene$prom),]
+peak.gr <- GRanges(seqnames = tested_peaks$chr,
+              ranges = IRanges(
+                start = tested_peaks$start,
+                end = tested_peaks$end))
+
+mcols(peak.gr)$peak <- tested_peaks$peak
+
+peak_tad_overlaps <- findOverlaps(peak.gr, NPC_tads.gr)
+length(peak_tad_overlaps)
+length(unique(queryHits(peak_tad_overlaps)))
+length(unique(subjectHits(peak_tad_overlaps)))
+
+peak_tads <- data.frame(peak=peak.gr$peak[queryHits(peak_tad_overlaps)], 
+                        tad=NPC_tads.gr$tad[subjectHits(peak_tad_overlaps)], 
+                        compartment=NPC_tads.gr$compartment[subjectHits(peak_tad_overlaps)], stringsAsFactors = F)
+
+cre2gene <- left_join(cre2gene, dplyr::rename(peak_tads, peak_tad=tad, peak_comp=compartment)) %>%
+  left_join(dplyr::rename(peak_tads, prom=peak, prom_tad=tad, prom_comp=compartment))
+
+cre2gene$inTAD <- cre2gene$peak_tad==cre2gene$prom_tad
+cre2gene$inTAD[is.na(cre2gene$inTAD)] <- "Single-call"
+cre2gene$inTAD[is.na(cre2gene$prom_tad)==T & is.na(cre2gene$peak_tad)==T] <- NA
+
+table(cre2gene$inTAD)
+
+p <- ggplot(filter(cre2gene, is.na(inTAD)==F), aes(sig.interaction, fill=inTAD)) +
+  geom_bar(position = "fill") +
+  scale_fill_manual(values = c("darkred", "darkorange", "deepskyblue3")) +
+  theme_classic() +
+  ylab("Fraction") +
+  xlab("Significant interaction") +
+  geom_text(stat='count',aes(label=..count..), position = position_fill(vjust = 0.5))
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/002_cre2gene_assignment_inTAD.pdf", width = 4, height = 4, useDingbats = F); print(p); dev.off()
+
+fisher.test(table(cre2gene$sig.interaction, cre2gene$inTAD==T))
+fisher.test(table(cre2gene$sig.interaction, cre2gene$inTAD==F))
+fisher.test(table(cre2gene$sig.interaction, cre2gene$inTAD=="Single-call"))
+```
+
+Also looking for enrichments in characterized enhancers:
+
+VISTA enhancers:
+
+```{r}
+encode_interaction.stats <- filter(peak.info, peak %in% cre2gene$peak) %>%
+  mutate(sig.interaction=peak %in% cre2gene$peak[cre2gene$sig.interaction])
+
+p <- ggplot(encode_interaction.stats, aes(grepl("hindbrain", vista_activity),fill=sig.interaction)) +
+ geom_bar(position = "fill") +
+  geom_text(stat='count',aes(label=..count..), position = position_fill(vjust = 0.5)) +
+  ylab("Fraction") +
+  xlab("VISTA fetal hindbrain enhancer") +
+  theme_classic() +
+  scale_fill_manual(values = c("indianred", "deepskyblue3"), name="Significant\ninteraction") 
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/002_cre2gene_Vista_hindbrainEnh.pdf", width = 3.5, height = 4, useDingbats = F); print(p); dev.off()
+
+fisher.test(table(grepl("hindbrain", encode_interaction.stats$vista_activity), encode_interaction.stats$sig.interaction==T))
+```
+
+```{r}
+chromHMM <- read_tsv("~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/Mouse_Cerebellum_peaks_final_chromHMM_tiles.txt", col_names = F)%>%
+  dplyr::select(X4, X8) %>%
+  dplyr::rename(peak = X4, chromHMM = X8)
+
+chromHMM_stats <- readRDS("~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/chromHMM_tiles_all_activity.rds")
+row.names(chromHMM_stats) <- chromHMM_stats$chromHMM
+chromHMM_stats <- chromHMM_stats[, 2:ncol(chromHMM_stats)]
+
+chromHMM_metadata <- read_tsv("~/Mouse_Cereb/006_peaks/002_external_data/encode_candidate_reg_elements/metadata.txt")
+
+table(chromHMM_stats[,1])
+chromHMM_hindbrain <- chromHMM_stats[,chromHMM_metadata$`File accession`[chromHMM_metadata$`Biosample term name`=="hindbrain"]]
+
+hindbrain_enh <- row.names(chromHMM_hindbrain)[rowSums(chromHMM_hindbrain == "Enh") >= 1]
+
+length(hindbrain_enh)
+
+hindbrain_enh_cres <- unique(chromHMM$peak[chromHMM$chromHMM %in% hindbrain_enh])
+
+length(hindbrain_enh_cres)
+
+encode_interaction.stats$hindbrain_enh <- encode_interaction.stats$peak %in% hindbrain_enh_cres
+
+table(encode_interaction.stats$hindbrain_enh)
+
+p <- ggplot(encode_interaction.stats, aes(hindbrain_enh,fill=sig.interaction)) +
+ geom_bar(position = "fill") +
+  geom_text(stat='count',aes(label=..count..), position = position_fill(vjust = 0.5)) +
+  ylab("Fraction") +
+  xlab("chromHMM fetal hindbrain enhancer") +
+  theme_classic() +
+  scale_fill_manual(values = c("indianred", "deepskyblue3"), name="Significant\ninteraction") 
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/002_cre2gene_chromHMM_hindbrainEnh.pdf", width = 3.5, height = 4, useDingbats = F); print(p); dev.off()
+
+fisher.test(table(encode_interaction.stats$hindbrain_enh==T, encode_interaction.stats$sig.interaction==T))
+```
+
+```{r}
+saveRDS(cre2gene, "~/Mouse_Cereb/Revisions/002_cre2gene_assignment/CRE_to_gene_assignment_all_tests.rds")
+saveRDS(cre2gene.final, "~/Mouse_Cereb/Revisions/002_cre2gene_assignment/CRE_to_gene_assignment_sigInteractions.rds")
+```
+
+```{r}
+sessionInfo()
+```

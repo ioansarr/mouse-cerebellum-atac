@@ -1,0 +1,404 @@
+---
+title: "Opossum Cerebellum 001 - Barcode QC with ArchR"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ArchR)
+  library(tidyverse)
+  library(RColorBrewer)
+})
+```
+
+```{r}
+addArchRThreads(threads = 20) 
+
+## Working directory. This is where the arrow files will be generated and stored.
+setwd("~/Opo_Cereb/")
+
+proj <- loadArchRProject("~/Opo_Cereb/proj2_finalCells/")
+
+markersGS_clusters_broad_cell_types <- readRDS("003_finalNucSet/Human_Cereb_finalNucSet_Clusters_merged_tiles_res1.0_markerGenes.rds")
+
+markersGS_cellAnno <- getMarkers(markersGS_clusters_broad_cell_types, cutOff = "FDR < 0.05 & Log2FC > 1.25")
+```
+
+Exploring clusters and known marker genes
+
+```{r, fig.width=8, fig.height=8}
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Sample_short", embedding = "UMAP_finalNucSet", pal = rev(colorRampPalette(brewer.pal(11, "Spectral"))(length(unique(proj$Sample_short)))), rastr = T, labelMeans = F)
+p2 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Clusters_finalNucSet_res1.0", embedding = "UMAP_finalNucSet", rastr = T)
+
+ggAlignPlots(p1, p2, type = "h")
+```
+
+```{r}
+interesting_genes <- toupper(c("Atoh1", "Sox2", "Notch1","Cyp26b1","Foxp2", "Skor2", "Car8", "Cdon", "Gad2", "Sox14", "Tlx3", "Lmx1a", "Eomes", "Mgat5","Pax2", "Top2a", "Ptf1a", "Kirrel2", "Rora", "Rorb", "Slc17a6", "Meis2", "Aqp4", "Olig2", "Cbln3", "Fgf3", "Grin2b", "Neurod1", "Nhlh1", "Gdf10", "Fabp7", "Map3k1", "Gli2", "Esrrg", "Sorcs3", "Cdh22", "Etv1", "Junb", "Mef2a", "Foxp1", "Cdh9", "March11", "Pvalb", "Lhx2", "Pax5", "Zfhx3", "Zfhx4", "Fgf17", "Syndig1l","Gabra6", "Slc1a3", "Inpp5d", "Cx3cr1", "Mobp", "Sox10", "Lims2", "Slc4a1", "Angptl8", "Lmx1b", "Isl1", "Lef1"))
+
+interesting_genes <- interesting_genes[interesting_genes %in% proj@geneAnnotation$genes$symbol]
+
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = interesting_genes, 
+    embedding = "UMAP_finalNucSet",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = NULL
+)
+
+p
+```
+
+```{r}
+inspect_clust <- function(clust,
+                          archrproj=proj,
+                          slot="Clusters_finalNucSet_res1.0",
+                          markers=markersGS_cellAnno,
+                          umap="UMAP_finalNucSet") {
+  
+  ## Index of cells belonging to the cluster
+  i <- which(getCellColData(archrproj, slot,drop = T)==clust)
+  print("Total cells")
+  print(length(i))
+  print("--------------------")
+  ## Timepoint distribution
+  print("Timepoint distribution")
+  print(sort(table(archrproj$Timepoint[i]), decreasing = T))
+  print(sort(table(archrproj$Sample_short[i]), decreasing = T))
+  
+  if (length(i) >= 30) {
+     ## Gettting top 20 markers, excluding LncRNAs and miRNAs with non-informative names
+      m <- markers[[clust]]$name[grepl("^Gm[0-9]|Rik$|^Mir[0-9]|XLOC|ENSMODG", markers[[clust]]$name)==F]
+  
+      if(length(m > 20)) {
+        m <- m[1:20]
+      }
+  
+      print("Top 20 markers")
+      print(m)
+      print("--------------------")
+  
+      ## Plotting top genes
+      print("Plotting top marker genes")
+      p <- plotEmbedding(
+        ArchRProj = archrproj, 
+        colorBy = "GeneScoreMatrix", 
+        name =m[is.na(m)==F], 
+        embedding = umap,
+        quantCut = c(0.01, 0.95),
+        imputeWeights = NULL,
+      )
+      print(p)
+      print("--------------------")
+      } else {
+        print("Too few cells to get markers")
+        }
+}
+```
+
+Initiating a "Cell_type" variable for our cells
+
+```{r}
+proj$Cell_type <- NA
+```
+
+
+```{r}
+inspect_clust("C1")
+```
+
+Too few cells, keeping them as "Other"
+
+```{r}
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0=="C1"] <- "Other"
+```
+
+```{r}
+inspect_clust("C2")
+```
+
+C2: Astroglia (mixture of astroblasts and adult astrocytes)
+
+```{r}
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0=="C2"] <- "Astroglia"
+```
+
+```{r}
+inspect_clust("C3")
+```
+
+C3: Astrocytes (WM) (part of astroglia)
+
+```{r}
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0=="C3"] <- "astro_parenhymal"
+```
+
+```{r}
+inspect_clust("C4")
+```
+
+C4: Microglia
+
+```{r}
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0=="C4"] <- "Microglia"
+```
+
+```{r}
+inspect_clust("C5")
+```
+
+```{r}
+oligo_m <- toupper(c("Mobp", "Sox10", "Olig2", "Lims2", "Gpr17", "Cspg4", "Mag"))
+  
+oligo_m <- oligo_m[oligo_m %in% proj@geneAnnotation$genes$symbol]
+
+plotEmbedding(
+        ArchRProj = proj, 
+        colorBy = "GeneScoreMatrix", 
+        name =oligo_m, 
+        embedding = "UMAP_finalNucSet",
+        quantCut = c(0.01, 0.95),
+        imputeWeights = NULL,
+      )
+```
+C5: OPC 
+
+```{r}
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0=="C5"] <- "OPC"
+```
+
+
+```{r}
+inspect_clust("C6")
+```
+
+C6: OPC 
+
+```{r}
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0=="C6"] <- "OPC"
+```
+
+```{r}
+inspect_clust("C7")
+```
+
+C7: oligodendrocytes
+
+```{r}
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0=="C7"] <- "Oligodendrocyte"
+```
+
+```{r}
+inspect_clust("C8")
+```
+
+C8: Vascular
+
+```{r}
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0=="C8"] <- "Vascular"
+```
+
+```{r}
+inspect_clust("C9")
+```
+
+C9: Purkinje cells
+
+```{r}
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0=="C9"] <- "PC"
+```
+
+```{r}
+inspect_clust("C10")
+```
+
+C10: Interneuron (GL)
+
+```{r}
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0=="C10"] <- "Interneuron_late_GL"
+```
+
+
+```{r}
+inspect_clust("C11")
+```
+
+C11: IN (ML/PL) aka "late"
+
+```{r}
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0=="C11"] <- "Interneuron_late_ML/PL"
+```
+
+```{r}
+inspect_clust("C12")
+```
+
+
+```{r}
+gc_m <- toupper(c("Pax6", "Atoh1", "Barhl1", "Gli2", "Nhlh1","Neurod1","Tmem71", "Cog7", "Pou2af1","Egfr","Etv1", "Cbln3", "Nfix", "Grin2b", "Gabra6", "Cadps2"))
+  
+gc_m <- gc_m[gc_m %in% proj@geneAnnotation$genes$symbol]
+
+plotEmbedding(
+        ArchRProj = proj, 
+        colorBy = "GeneScoreMatrix", 
+        name =gc_m, 
+        embedding = "UMAP_finalNucSet",
+        quantCut = c(0.01, 0.95),
+        imputeWeights = NULL,
+      )
+```
+
+```{r}
+inspect_clust("C13")
+```
+
+C12-C13: GNPs
+
+```{r}
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0 %in% c("C12", "C13")] <- "GCP"
+```
+
+```{r}
+inspect_clust("C14")
+```
+
+C14: IN
+
+```{r}
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0=="C14"] <- "Interneuron_P21"
+```
+
+```{r}
+inspect_clust("C15")
+```
+
+C15: migrating GCs
+
+```{r}
+inspect_clust("C16")
+```
+
+C16: IGL (mature GCs in P21)
+
+However, both C15 and C16 seem to contain traces of UBCs. Let's see if we can pick them out by subclustering.
+
+```{r}
+c15c16 <- subsetCells(proj, cellNames = proj$cellNames[proj$Clusters_finalNucSet_res1.0 %in% c("C15", "C16")])
+
+c15c16 <- addClusters(input = c15c16,
+                    name = "Subclusters",
+                    reducedDims = "HarmonyLSI_finalNucSet",
+                    method = "Seurat",
+                    force = T,
+                    resolution=0.6,
+                    corCutOff = 0.75,
+                    scaleDims = FALSE,
+                    seed = 1)
+
+c15c16  <- addUMAP(ArchRProj = c15c16,
+                name = "UMAP_sub",
+                reducedDims = "HarmonyLSI_finalNucSet",
+                minDist = 0.2,
+                metric = "cosine",
+                nNeighbors = 25,
+                force = T,
+                seed = 1,
+                scaleDims = F,
+                corCutOff = 0.75)
+
+plotEmbedding(ArchRProj = c15c16, colorBy = "cellColData", name = "Subclusters", embedding = "UMAP_sub", rastr = T)
+```
+
+```{r}
+gcVsUBC <- toupper(c("Lmx1a", "Trpc3", "Etv1", "Cbln3", "Pax6", "Cadps2", "Gabra6", "Pax6"))
+
+gcVsUBC <- gcVsUBC[gcVsUBC %in% c15c16@geneAnnotation$genes$symbol]
+
+p <- plotEmbedding(
+    ArchRProj = c15c16, 
+    colorBy = "GeneScoreMatrix", 
+    name = gcVsUBC, 
+    embedding = "UMAP_sub",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = NULL
+)
+
+p
+
+sum(c15c16$Subclusters=="C3")
+table(c15c16$Sample_short[c15c16$Subclusters=="C3"])
+table(c15c16$Clusters_finalNucSet_res1.0[c15c16$Subclusters=="C3"])
+```
+
+Cluster 3 here is Lmx1a+ -> UBC
+
+```{r}
+ubc_names <- c15c16$cellNames[c15c16$Subclusters=="C3"] 
+
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0 %in% c("C15", "C16") & !(proj$cellNames %in% ubc_names)] <- "GC_diff"
+
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0 %in% c("C15", "C16") & proj$cellNames %in% ubc_names] <- "UBC"
+```
+
+```{r}
+inspect_clust("C17")
+```
+
+```{r}
+inspect_clust("C18")
+```
+
+C18-22: no real markers but show activity for known GC markers:
+
+```{r}
+plotEmbedding(
+        ArchRProj = proj, 
+        colorBy = "GeneScoreMatrix", 
+        name =gc_m, 
+        embedding = "UMAP_finalNucSet",
+        quantCut = c(0.01, 0.95),
+        imputeWeights = NULL,
+      )
+```
+
+```{r}
+proj$Cell_type[proj$Clusters_finalNucSet_res1.0 %in% c("C17", "C18", "C19", "C20", "C21", "C22")] <- "GC_mature"
+```
+
+```{r}
+sum(is.na(proj$Cell_type))
+sort(table(proj$Cell_type), decreasing = T)
+
+unique(proj$Cell_type)
+
+cell_hierarchy <- data.frame(Cell_type=unique(proj$Cell_type),
+           Cell_type_broad=c("Interneuron", "GC", "PC", "Astroglia", "GC", "GC", "UBC", "Other", "Oligodendrocyte", "Microglia", "Oligodendrocyte", "Other", "Interneuron", "Interneuron", "Astroglia"), stringsAsFactors = F)
+
+cell.info <- getCellColData(proj) %>%
+  as.data.frame() %>%
+  left_join(cell_hierarchy)
+
+sum(cell.info$Cell_type==proj$Cell_type)
+
+proj$Cell_type_broad <- cell.info$Cell_type_broad
+```
+
+```{r, fig.width=8, fig.height=8}
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Sample_short", embedding = "UMAP_finalNucSet", pal = rev(colorRampPalette(brewer.pal(11, "Spectral"))(length(unique(proj$Sample_short)))), rastr = T, labelMeans = F)
+p2 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Cell_type", embedding = "UMAP_finalNucSet", rastr = T)
+
+ggAlignPlots(p1, p2, type = "h")
+```
+
+```{r}
+saveArchRProject(proj)
+```
+
+```{r}
+sessionInfo()
+```
+

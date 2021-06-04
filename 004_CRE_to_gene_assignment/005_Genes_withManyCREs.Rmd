@@ -1,0 +1,94 @@
+---
+title: "Genes with many CREs"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(VennDiagram)
+library(RColorBrewer)
+library(WebGestaltR)
+```
+
+
+```{r}
+peak2gene <- readRDS("~/Mouse_Cereb/Revisions/002_cre2gene_assignment/CRE_to_gene_assignment_sigInteractions.rds")
+
+mouse_peaks <- read.table("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt", header = T, sep = "\t", stringsAsFactors = F)
+```
+
+
+```{r}
+gene.stats <- left_join(peak2gene, dplyr::select(mouse_peaks, peak)) %>%
+  group_by(gene) %>%
+  summarise(nPeaks=n_distinct(peak))
+
+
+plot(sort(gene.stats$nPeaks))
+
+```
+
+```{r}
+p <- ggplot(data = NULL, aes(x=as.numeric(1:length(gene.stats$nPeaks)), y = as.numeric(sort(gene.stats$nPeaks, decreasing = T)), color=as.factor(sort(gene.stats$nPeaks, decreasing = T)>=10))) +
+  geom_path(lwd=0.7) +
+  ylab("Number of distal CREs") +
+  xlab("Ranked genes") +
+  geom_hline(yintercept = 9.8, color="indianred", lty="dashed", lwd=0.5) +
+  geom_vline(xintercept = max(which(sort(gene.stats$nPeaks, decreasing = T)>=10)), color="indianred", lty="dashed", lwd=0.5) +
+  scale_color_manual(values=c("gray50", "deepskyblue3"), guide=F) +
+  scale_x_continuous(breaks = seq(0, 9000, 1000)) +
+  theme_classic()
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/002_genes_with_moreThan10_distalCREs_cutoff.pdf", width = 4, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+
+Let's run a BP enrichment analysis
+
+```{r}
+gene.symbols <- read.table("~/Data/scATAC_pipeline_v3/resources/mouse_coding_ens94_gene_symbols.txt", header = T, stringsAsFactors = F)
+
+top_genes <- gene.stats$gene[gene.stats$nPeaks >= 10]
+
+WebGestaltR(enrichMethod = "ORA",
+            organism = "mmusculus",
+            enrichDatabase = "geneontology_Biological_Process_noRedundant",
+            interestGene = unique(na.omit(gene.symbols$ensembl[gene.symbols$symbol %in% top_genes])),
+            interestGeneType = "ensembl_gene_id",
+            referenceGene = unique(na.omit(gene.symbols$ensembl[gene.symbols$symbol %in% gene.stats$gene])),
+            referenceGeneType = "ensembl_gene_id",
+            fdrMethod = "BH", sigMethod = "fdr", fdrThr = 0.05,
+            outputDirectory = "~/Mouse_Cereb/Revisions/002_cre2gene_assignment/" ,projectName = 'genes_10distalCREs_BiologicalProcess')
+
+WebGestaltR(enrichMethod = "ORA",
+            organism = "mmusculus",
+            enrichDatabase = "geneontology_Molecular_Function_noRedundant",
+            interestGene = unique(na.omit(gene.symbols$ensembl[gene.symbols$symbol %in% top_genes])),
+            interestGeneType = "ensembl_gene_id",
+            referenceGene = unique(na.omit(gene.symbols$ensembl[gene.symbols$symbol %in% gene.stats$gene])),
+            referenceGeneType = "ensembl_gene_id",
+            fdrMethod = "BH", sigMethod = "fdr", fdrThr = 0.05,
+            outputDirectory = "~/Mouse_Cereb/Revisions/002_cre2gene_assignment/" ,projectName = 'genes_10distalCREs_MolecularFunction')
+```
+
+```{r}
+top_bp <- read_tsv("~/Mouse_Cereb/Revisions/002_cre2gene_assignment/Project_genes_10distalCREs_BiologicalProcess/enrichment_results_genes_10distalCREs_BiologicalProcess.txt") %>%
+  top_n(30, overlap)
+
+p <- ggplot(top_bp, aes(x=overlap, y=reorder(description, overlap), color = -log10(pValue)))+
+  geom_point(aes(size=enrichmentRatio)) +
+  scale_color_gradient(low = "yellow", high="red", name='-log'[10]~' p-value') +
+  scale_size_continuous(name="Enrichment") +
+  ylab("") +
+  ggtitle("Biological Process") +
+  xlab("Count") +
+  theme_bw()
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/002_Mouse_genes_10_distalPeaks_BPenrichment.pdf", width = 7, height = 5, useDingbats = F); print(p); dev.off()
+```

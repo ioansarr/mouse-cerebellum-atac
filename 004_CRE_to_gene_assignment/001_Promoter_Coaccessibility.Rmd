@@ -1,0 +1,132 @@
+---
+title: "CRE to gene assignment: Part 1 - Promoter-peak co-accessibility"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(GenomicRanges)
+  library(fitdistrplus)
+  library(SummarizedExperiment)
+})
+```
+
+We will implement a two step approach to improve the confidence of our assignment:
+
+1. Promoter-peak co-accessibility (in pseudocells)
+2. Gene-peak correlation (based on gene scores, in pseudobulks of cell type/state x stage)
+
+This approach allows us to use complementary (although clearly not independent) dimensions of the data:
+
+A) Promoter vs gene score
+B) Pseudocell (capturing technical variation) vs pseudobulk (focusing on biological variation and accounting for cell type abundances).
+
+We will also improve our significance estimates by calculating empirical distributions for all promoters/genes.
+
+Additionally, we are now focusing on robust distal (intronic and intergenic) peaks.
+
+```{r}
+peak.info <- read_tsv("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt")
+
+promoters <- peak.info$peak[peak.info$genomic_class=="protein_coding-Promoter" & peak.info$robust==T]
+distal <- peak.info$peak[peak.info$genomic_class_broad %in% c("Distal", "Intronic") & peak.info$robust==T]
+```
+
+### 1. Promoter-peak co-accessibility
+
+We have already estimated correlations in ~4,000 pseudocells using ArchR:
+
+```{r}
+peak2peak.correlations <- readRDS("~/Mouse_Cereb/008_coaccessibility/Mouse_Cerebellum_coaccessibility_conns_all.rds")
+
+peaks <- paste(seqnames(peak2peak.correlations@metadata$peakSet),
+                        start(ranges(peak2peak.correlations@metadata$peakSet)), 
+                        end(ranges(peak2peak.correlations@metadata$peakSet)), sep = "_")
+
+peak2peak.correlations$prom <- peaks[peak2peak.correlations$queryHits]
+peak2peak.correlations$peak <- peaks[peak2peak.correlations$subjectHits]
+
+prom2peak.correlations <- peak2peak.correlations[peak2peak.correlations$prom %in% promoters & peak2peak.correlations$peak %in% distal,]
+
+dim(prom2peak.correlations)
+```
+
+Reading in the same pseudocell matrix, which we will now use to establish null correlations:
+
+```{r}
+pseudocells <- readRDS("~/Mouse_Cereb/proj4_chromVar/Peak2GeneLinks/seATAC-Group-KNN.rds")
+pseudocells.peaks <- paste(seqnames(pseudocells@rowRanges), start(pseudocells@rowRanges), end(pseudocells@rowRanges), sep = "_")
+
+pseudocells.mat <- assay(pseudocells)
+dim(pseudocells.mat)
+
+row.names(pseudocells.mat) <- pseudocells.peaks
+
+## Subsetting to peaks that have been tested here (robust promoters and distal peaks)
+pseudocells.mat <- pseudocells.mat[row.names(pseudocells.mat) %in% c(prom2peak.correlations$prom, prom2peak.correlations$peak),]
+
+dim(pseudocells.mat)
+```
+
+Making a background distribution:
+
+Per gene, we sample 10,000 peaks from different chromosomes and estimate correlations.
+
+We will fit the correlations to a normal distribution, from which we will store the mean and standard deviation:
+
+```{r}
+uniq_prom <- unique(prom2peak.correlations$prom)
+
+prom_null_corr <- Reduce(bind_rows,lapply(1:length(uniq_prom), function(i) {
+  ## Promoter and its chromosome
+  prom <- uniq_prom[i]
+  chr <- unique(as.character(prom2peak.correlations$seqnames[prom2peak.correlations$prom==prom]))
+  
+  ## Sampling 10,000 random peaks from different chromosomes
+  random_peaks <- sample(prom2peak.correlations$peak[as.character(prom2peak.correlations$seqnames)!=chr], 1e4)
+  
+  ## Computing correlations
+  shuffled_cor <- as.numeric(cor(pseudocells.mat[prom,], t(pseudocells.mat[random_peaks,])))
+  
+  ## Fitting a normal distribution to the correlation coefficients:
+  shuffled_cor.norm <- fitdist(shuffled_cor, distr = "norm")
+  
+  ## Returning promoter/gene name, as well as mean and sd of the empirical null distribution
+  df <- data.frame(prom, null_mean=shuffled_cor.norm$estimate[1], null_sd=shuffled_cor.norm$estimate[2], stringsAsFactors = F)
+  return(df)
+}))
+```
+
+```{r}
+saveRDS(prom2peak.correlations, "~/Mouse_Cereb/Revisions/002_cre2gene_assignment/001_promoter-peak_Correlations_robustDistalOnly.rds")
+saveRDS(prom_null_corr, "~/Mouse_Cereb/Revisions/002_cre2gene_assignment/001_promoter-peak_nullCorrelations_robustDistalOnly.rds")
+```
+
+
+```{r}
+summary(prom_null_corr$null_mean)
+summary(prom_null_corr$null_sd)
+
+## For visualisation purposes, let's compare the true prom-peak correlations with a normal distribution with the mean and standard deviation of the controls:
+df.plot <- data.frame(type=c(rep("true", length(prom2peak.correlations$correlation)),
+                             rep("null", length(prom2peak.correlations$correlation))),
+                      correlation=c(
+                        prom2peak.correlations$correlation,
+                        rnorm(
+                          length(prom2peak.correlations$correlation),
+                          mean = mean(prom_null_corr$null_mean),
+                          sd = mean(prom_null_corr$null_sd))))
+ 
+
+ggplot(df.plot, aes(correlation, fill=type, color=type)) +
+  geom_density(alpha=0.2) +
+  geom_vline(xintercept = 0, color="gray70", lty="dashed") +
+  theme_classic()
+```
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,197 @@
+---
+title: "CRE to gene assignment: Part 2 - Gene score-peak correlations"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(GenomicRanges)
+  library(fitdistrplus)
+  library(SummarizedExperiment)
+})
+```
+
+```{r}
+peak.info <- read_tsv("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt")
+
+promoters <- peak.info$peak[peak.info$genomic_class=="protein_coding-Promoter" & peak.info$robust==T]
+distal <- peak.info$peak[peak.info$genomic_class_broad %in% c("Distal", "Intronic") & peak.info$robust==T]
+```
+
+```{r}
+peak2peak.correlations <- readRDS("~/Mouse_Cereb/008_coaccessibility//Mouse_Cerebellum_coaccessibility_conns_all.rds")
+
+peaks <- paste(seqnames(peak2peak.correlations@metadata$peakSet),
+                        start(ranges(peak2peak.correlations@metadata$peakSet)), 
+                        end(ranges(peak2peak.correlations@metadata$peakSet)), sep = "_")
+
+peak2peak.correlations$prom <- peaks[peak2peak.correlations$queryHits]
+peak2peak.correlations$peak <- peaks[peak2peak.correlations$subjectHits]
+
+prom2peak.correlations <- peak2peak.correlations[peak2peak.correlations$prom %in% promoters & peak2peak.correlations$peak %in% distal,]
+
+dim(prom2peak.correlations)
+```
+
+Adding information about the gene
+
+```{r}
+gene2peak.correlations <- as.data.frame(prom2peak.correlations) %>%
+  left_join(dplyr::rename(dplyr::select(peak.info, peak, associated_gene), prom=peak, gene=associated_gene))
+```
+
+Now let's correlate the CRE activity with the gene score using cell type/state x stage pseudobulks:
+
+```{r}
+## Minimum number of cells to make a pseudobulk
+minN <- 40
+
+atac.anno <- readRDS("~/Mouse_Cereb/004_cellTypes_broad/Mouse_Cerebellum_atac_finalCellType_annotation.rds")
+
+atac.groups <- filter(atac.anno, Cell_type_broad != "Other") %>%
+  group_by(Cell_type, Cell_type_broad, Timepoint) %>%
+  dplyr::count() %>%
+  ungroup()
+
+## Number of groups considered
+sum(atac.groups$n >= minN)
+
+## Percentage of cells used
+sum(atac.groups$n[atac.groups$n >= minN])/sum(atac.groups$n)
+
+atac.groups.high <- filter(atac.groups, n >= minN)
+```
+
+Let's make pseudobulks by cell type and stage:
+
+```{r}
+gS <- readRDS("~/Mouse_Cereb/003_finalNucSet/Mouse_Cereb_finalNucSet_GeneScoreMatrix_SE.rds")
+gS_mat <- assay(gS)
+
+row.names(gS_mat) <- gS@elementMetadata$name
+
+gs_pseudobulk <- do.call(cbind,lapply(1:nrow(atac.groups.high), function(i) {
+  cells <- atac.anno$cell[atac.anno$Cell_type==atac.groups.high$Cell_type[i] & atac.anno$Timepoint==atac.groups.high$Timepoint[i]]
+  return(Matrix::rowSums(gS_mat[, cells]))
+}))
+
+colnames(gs_pseudobulk) <- paste(atac.groups.high$Cell_type, atac.groups.high$Timepoint, sep = ":")
+
+dim(gs_pseudobulk)
+
+rm("gS")
+rm("gS_mat")
+
+saveRDS(gs_pseudobulk, "~/Mouse_Cereb/Revisions/002_cre2gene_assignment/002_geneScore_cellTypeByStage_pseudobulks_raw.rds")
+```
+
+The same for peaks
+
+```{r}
+peaks <- readRDS("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peak_matrix_SE_withInfo_robustPeaks.rds")
+
+peak_mat <- assay(peaks)
+
+row.names(peak_mat) <- peaks@elementMetadata$peak
+
+peak_pseudobulk <- do.call(cbind,lapply(1:nrow(atac.groups.high), function(i) {
+  cells <- atac.anno$cell[atac.anno$Cell_type==atac.groups.high$Cell_type[i] & atac.anno$Timepoint==atac.groups.high$Timepoint[i]]
+  return(Matrix::rowSums(peak_mat[, cells]))
+}))
+
+colnames(peak_pseudobulk) <- paste(atac.groups.high$Cell_type, atac.groups.high$Timepoint, sep = ":")
+
+dim(peak_pseudobulk)
+
+saveRDS(peak_pseudobulk, "~/Mouse_Cereb/Revisions/002_cre2gene_assignment/002_peaks_cellTypeByStage_pseudobulks_raw.rds")
+```
+
+Scaling and log-transforming
+
+```{r}
+gs_pseudobulk_scaled <- t(t(gs_pseudobulk)/(colSums(gs_pseudobulk))) * 1e4
+peak_pseudobulk_scaled <- t(t(peak_pseudobulk)/(colSums(peak_pseudobulk))) * 1e6
+
+gs_pseudobulk_scaled.log <- log2(gs_pseudobulk_scaled + 1)
+peak_pseudobulk_scaled.log <- log2(peak_pseudobulk_scaled + 1)
+```
+
+Now computing correlations between gene score and peak activity
+
+```{r}
+gene2peak.correlations$geneScoreCorrelation <- sapply(1:nrow(gene2peak.correlations), function(i) {
+  return(round(cor(gs_pseudobulk_scaled.log[gene2peak.correlations$gene[i],], peak_pseudobulk_scaled.log[gene2peak.correlations$peak[i],]), digits = 3))
+})
+
+saveRDS(gene2peak.correlations, "~/Mouse_Cereb/Revisions/002_cre2gene_assignment/002_gene-peak_Correlations_robustDistalOnly.rds")
+```
+
+```{r}
+hist(gene2peak.correlations$geneScoreCorrelation, breaks = 100)
+hist(gene2peak.correlations$geneScoreCorrelation[gene2peak.correlations$correlation > 0.05], breaks = 100)
+
+ggplot(gene2peak.correlations, aes(x=correlation, y=geneScoreCorrelation)) +
+  geom_point(alpha=0.05)
+
+cor(gene2peak.correlations$correlation, gene2peak.correlations$geneScoreCorrelation)
+
+sum(gene2peak.correlations$correlation > 0.05 & gene2peak.correlations$geneScoreCorrelation > 0.4)
+```
+
+Null correlations (per gene)
+
+```{r}
+uniq_gene <- unique(gene2peak.correlations$gene)
+
+gene_null_corr <- Reduce(bind_rows,lapply(1:length(uniq_gene), function(i) {
+  ## gene and its chromosome
+  gene <- uniq_gene[i]
+  chr <- unique(as.character(gene2peak.correlations$seqnames[gene2peak.correlations$gene==gene]))
+  
+  ## Sampling 10,000 random peaks from different chromosomes
+  random_peaks <- sample(gene2peak.correlations$peak[as.character(gene2peak.correlations$seqnames)!=chr], 1e4)
+  
+  ## Computing correlations
+  shuffled_cor <- as.numeric(cor(gs_pseudobulk_scaled.log[gene,], t(peak_pseudobulk_scaled.log[random_peaks,])))
+  
+  ## Fitting a normal distribution to the correlation coefficients:
+  shuffled_cor.norm <- fitdist(shuffled_cor, distr = "norm")
+  
+  ## Returning geneoter/gene name, as well as mean and sd of the empirical null distribution
+  df <- data.frame(gene, null_mean=shuffled_cor.norm$estimate[1], null_sd=shuffled_cor.norm$estimate[2], stringsAsFactors = F)
+  return(df)
+}))
+```
+
+```{r}
+saveRDS(gene_null_corr, "~/Mouse_Cereb/Revisions/002_cre2gene_assignment/002_gene-peak_nullCorrelations_robustDistalOnly.rds")
+```
+
+```{r}
+summary(gene_null_corr$null_mean)
+summary(gene_null_corr$null_sd)
+
+## For visualisation purposes, let's compare the true gene-peak correlations with a normal distribution with the mean and standard deviation of the controls:
+df.plot <- data.frame(type=c(rep("true", length(gene2peak.correlations$geneScoreCorrelation)),
+                             rep("null", length(gene2peak.correlations$geneScoreCorrelation))),
+                      correlation=c(
+                        gene2peak.correlations$geneScoreCorrelation,
+                        rnorm(
+                          length(gene2peak.correlations$geneScoreCorrelation),
+                          mean = mean(gene_null_corr$null_mean),
+                          sd = mean(gene_null_corr$null_sd))))
+ 
+
+ggplot(df.plot, aes(correlation, fill=type, color=type)) +
+  geom_density(alpha=0.2) +
+  geom_vline(xintercept = 0, color="gray70", lty="dashed") +
+  theme_classic()
+```
+
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,449 @@
+---
+title: "Mouse Cerebellum - Integrate differentiation across lineages"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(UpSetR)
+  library(circlize)
+  library(WebGestaltR)
+  library(viridis)
+  library(gridExtra)
+  library(FactoMineR)
+  library(factoextra)
+})
+```
+
+Here we want to identify commonalities and differences between clusters
+
+We can start by asking about the overlap between dynamic peaks, genes and TFs across the differentation of GCs, PCs and Interneurons.
+
+```{r}
+mouse.peaks <- read.table("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt", header = T, sep = "\t", stringsAsFactors = F)
+
+sig.peaks.GC <- readLines("~/Mouse_Cereb/015_withinLineages/GC/Mouse_withinGC_lineage_peaks_pseudotime_MMI_significant.txt")
+sig.peaks.PC <- readLines("~/Mouse_Cereb/015_withinLineages/PC/Mouse_withinPC_lineage_peaks_pseudotime_MMI_significant.txt")
+sig.peaks.Interneuron <- readLines("~/Mouse_Cereb/015_withinLineages/Interneuron/Mouse_withinInterneuron_lineage_peaks_pseudotime_MMI_significant.txt")
+
+clust.peaks.GC <- readRDS("~/Mouse_Cereb/015_withinLineages/GC/Mouse_withinGC_lineage_peaks_Mfuzz_cluster_object.rds")
+clust.peaks.PC <- readRDS("~/Mouse_Cereb/015_withinLineages/PC/Mouse_withinPC_lineage_peaks_Mfuzz_cluster_object.rds")
+clust.peaks.Interneuron <- readRDS("~/Mouse_Cereb/015_withinLineages/Interneuron/Mouse_withinInterneuron_lineage_peaks_Mfuzz_cluster_object.rds")
+
+peaks.list <- list(GC=sig.peaks.GC, PC=sig.peaks.PC, Interneuron=sig.peaks.Interneuron)
+upset(fromList(peaks.list), order.by = "freq", main.bar.color = c("#238a04", "#d83d2f", "#3b4ea7", "#cca539", "#49bab8", "#82807e", "#c44bc2"), sets.bar.color = c("#238a04", "#d83d2f", "#3b4ea7"))
+
+if(dir.exists("~/Mouse_Cereb/Figures/007_withinLineages/Integrative")==F) {
+  dir.create("~/Mouse_Cereb/Figures/007_withinLineages/Integrative")
+}
+
+pdf("~/Mouse_Cereb/Figures/007_withinLineages/Integrative/Mouse_Cerebellum_sigPeaks_inDiff_GC_PC_Interneuron_upset.pdf", width = 6, height = 4, useDingbats = F); upset(fromList(peaks.list), order.by = "freq", main.bar.color = c("#238a04", "#d83d2f", "#3b4ea7", "#cca539", "#49bab8", "#82807e", "#c44bc2"), sets.bar.color = c("#238a04", "#d83d2f", "#3b4ea7"));dev.off()
+```
+
+Let's compare to the degree of overlap between dynamic genes
+
+```{r}
+sig.genes.GC <- readLines("~/Mouse_Cereb/015_withinLineages/GC/Mouse_withinGC_lineage_genes_pseudotime_MMI_significant.txt")
+sig.genes.PC <- readLines("~/Mouse_Cereb/015_withinLineages/PC/Mouse_withinPC_lineage_genes_pseudotime_MMI_significant.txt")
+sig.genes.Interneuron <- readLines("~/Mouse_Cereb/015_withinLineages/Interneuron/Mouse_withinInterneuron_lineage_genes_pseudotime_MMI_significant.txt")
+
+genes.list <- list(GC=sig.genes.GC, PC=sig.genes.PC, Interneuron=sig.genes.Interneuron)
+upset(fromList(genes.list), order.by = "freq")
+```
+
+We can also ask if specific clusters are enriched for unique, 2-way or 3-way sharing of the peaks.
+
+```{r}
+gc_clust <- data.frame(peak=names(clust.peaks.GC$cluster),
+                       cluster=factor(clust.peaks.GC$cluster, levels=c(2,3,1,5,6,4,7))) %>%
+  mutate(pleiotropy= factor(ifelse(peak %in% intersect(names(clust.peaks.PC$cluster), names(clust.peaks.Interneuron$cluster)),
+                            yes = "3-way",
+                            no = ifelse(peak %in% union(names(clust.peaks.PC$cluster), names(clust.peaks.Interneuron$cluster)), yes = "2-way", no = "unique")), levels = c("unique", "2-way", "3-way"))) %>%
+  left_join(mutate(mouse.peaks, peak=gsub("_", "-", peak)))
+
+table(gc_clust$pleiotropy)
+
+p <- ggplot(gc_clust, aes(pleiotropy, fill=cluster)) +
+  geom_bar(position = "fill", width=0.8) +
+  scale_fill_brewer(palette = "Spectral") +
+  xlab("Pleiotropy in differentiation") +
+  ylab("Fraction") +
+  geom_text(stat='count',aes(label=..count..), position = position_fill(vjust = 0.5)) +
+  theme_classic()+
+  ggtitle("GC peaks")
+
+p
+
+pdf("~/Mouse_Cereb/Figures/007_withinLineages/Integrative/Mouse_Cerebellum_GC_peakClusters_byPleiotropy.pdf", width = 4, height = 4, useDingbats = F); print(p); dev.off()
+
+
+p1 <-ggplot(filter(gc_clust, genomic_class_broad %in% c("Distal", "Intronic")), aes(x=pleiotropy, fill=pleiotropy, y=meanPhastCons_100bp)) +
+  geom_boxplot(notch = T) +
+  scale_fill_brewer(palette = "Greens", name="Pleiotropy") +
+  ylab("PhastCons vertebrates\n(distal CREs)") +
+  ggtitle("GC cluster (in progressing differentiation order)") +
+  theme_classic()+
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.line.x = element_blank(), axis.title.x = element_blank()) +
+  facet_wrap(~cluster, nrow=1) 
+
+p2 <- ggplot(filter(gc_clust, genomic_class_broad %in% c("Distal", "Intronic")), aes(pleiotropy, fill=pleiotropy)) +
+  geom_bar(position="dodge", color="black") +
+  scale_fill_brewer(palette = "Greens", name="Pleiotropy") +
+  scale_y_reverse() +
+  ylab("Cell count") +
+  theme_classic()+
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.background = element_blank(),
+  strip.text.x = element_blank(), axis.title.x = element_blank()) +
+  facet_wrap(~cluster, nrow=1) 
+
+grid.arrange(p1, p2, ncol=1, heights=c(3, 1)) 
+
+pdf("~/Mouse_Cereb/Figures/007_withinLineages/Integrative/Mouse_Cerebellum_GC_phastCons_by_cluster_and_pleiotropy.pdf", width = 7, height = 4, useDingbats = F); grid.arrange(p1, p2, ncol=1, heights=c(3, 1)) ; dev.off()
+```
+
+```{r}
+pc_clust <- data.frame(peak=names(clust.peaks.PC$cluster),
+                       cluster=factor(clust.peaks.PC$cluster, levels=c(3,1,4,5,2))) %>%
+  mutate(pleiotropy= factor(ifelse(peak %in% intersect(names(clust.peaks.GC$cluster), names(clust.peaks.Interneuron$cluster)),
+                            yes = "3-way",
+                            no = ifelse(peak %in% union(names(clust.peaks.GC$cluster), names(clust.peaks.Interneuron$cluster)), yes = "2-way", no = "unique")), levels = c("unique", "2-way", "3-way")))%>%
+  left_join(mutate(mouse.peaks, peak=gsub("_", "-", peak)))
+
+table(pc_clust$pleiotropy)
+
+p <- ggplot(pc_clust, aes(pleiotropy, fill=cluster)) +
+  geom_bar(position = "fill", width = 0.8) +
+  scale_fill_brewer(palette = "Spectral") +
+  xlab("Pleiotropy in differentiation") +
+  ylab("Fraction") +
+  geom_text(stat='count',aes(label=..count..), position = position_fill(vjust = 0.5)) +
+  theme_classic() +
+  ggtitle("PC peaks")
+
+p
+
+pdf("~/Mouse_Cereb/Figures/007_withinLineages/Integrative/Mouse_Cerebellum_PC_peakClusters_byPleiotropy.pdf", width = 4, height = 4, useDingbats = F); print(p); dev.off()
+
+p1 <-ggplot(filter(pc_clust, genomic_class_broad %in% c("Distal", "Intronic")), aes(x=pleiotropy, fill=pleiotropy, y=meanPhastCons_100bp)) +
+  geom_boxplot(notch = T) +
+  scale_fill_brewer(palette = "Blues", name="Pleiotropy") +
+  ylab("PhastCons vertebrates\n(distal CREs)") +
+  ggtitle("PC cluster (in progressing differentiation order)") +
+  theme_classic()+
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.line.x = element_blank(), axis.title.x = element_blank()) +
+  facet_wrap(~cluster, nrow=1) 
+
+p2 <- ggplot(filter(pc_clust, genomic_class_broad %in% c("Distal", "Intronic")), aes(pleiotropy, fill=pleiotropy)) +
+  geom_bar(position="dodge", color="black") +
+  scale_fill_brewer(palette = "Blues", name="Pleiotropy") +
+  scale_y_reverse() +
+  ylab("Cell count") +
+  theme_classic()+
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.background = element_blank(),
+  strip.text.x = element_blank(), axis.title.x = element_blank()) +
+  facet_wrap(~cluster, nrow=1) 
+
+grid.arrange(p1, p2, ncol=1, heights=c(3, 1)) 
+
+pdf("~/Mouse_Cereb/Figures/007_withinLineages/Integrative/Mouse_Cerebellum_PC_phastCons_by_cluster_and_pleiotropy.pdf", width = 7, height = 4, useDingbats = F); grid.arrange(p1, p2, ncol=1, heights=c(3, 1)) ; dev.off()
+
+```
+
+```{r}
+inter_clust <- data.frame(peak=names(clust.peaks.Interneuron$cluster),
+                       cluster=factor(clust.peaks.Interneuron$cluster, levels=c(5,4,2,1,3))) %>%
+  mutate(pleiotropy= factor(ifelse(peak %in% intersect(names(clust.peaks.PC$cluster), names(clust.peaks.GC$cluster)),
+                            yes = "3-way",
+                            no = ifelse(peak %in% union(names(clust.peaks.PC$cluster), names(clust.peaks.GC$cluster)), yes = "2-way", no = "unique")), levels = c("unique", "2-way", "3-way")))%>%
+  left_join(mutate(mouse.peaks, peak=gsub("_", "-", peak)))
+
+table(inter_clust$pleiotropy)
+
+p <- ggplot(inter_clust, aes(pleiotropy, fill=cluster)) +
+  geom_bar(position = "fill", width = 0.8) +
+  scale_fill_brewer(palette = "Spectral") +
+  xlab("Pleiotropy in differentiation") +
+  geom_text(stat='count',aes(label=..count..), position = position_fill(vjust = 0.5)) +
+  theme_classic() +
+  ggtitle("Interneuron peaks")
+
+p
+
+pdf("~/Mouse_Cereb/Figures/007_withinLineages/Integrative/Mouse_Cerebellum_Interneuron_peakClusters_byPleiotropy.pdf", width = 4, height = 4, useDingbats = F); print(p); dev.off()
+
+p1 <-ggplot(filter(inter_clust, genomic_class_broad %in% c("Distal", "Intronic")), aes(x=pleiotropy, fill=pleiotropy, y=meanPhastCons_100bp)) +
+  geom_boxplot(notch = T) +
+  scale_fill_brewer(palette = "Reds", name="Pleiotropy") +
+  ylab("PhastCons vertebrates\n(distal CREs)") +
+  ggtitle("Interneuron cluster (in progressing differentiation order)") +
+  theme_classic()+
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), axis.line.x = element_blank(), axis.title.x = element_blank()) +
+  facet_wrap(~cluster, nrow=1) 
+
+p2 <- ggplot(filter(inter_clust, genomic_class_broad %in% c("Distal", "Intronic")), aes(pleiotropy, fill=pleiotropy)) +
+  geom_bar(position="dodge", color="black") +
+  scale_fill_brewer(palette = "Reds", name="Pleiotropy") +
+  scale_y_reverse() +
+  ylab("Cell count") +
+  theme_classic()+
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), strip.background = element_blank(),
+  strip.text.x = element_blank(), axis.title.x = element_blank()) +
+  facet_wrap(~cluster, nrow=1) 
+
+grid.arrange(p1, p2, ncol=1, heights=c(3, 1)) 
+
+pdf("~/Mouse_Cereb/Figures/007_withinLineages/Integrative/Mouse_Cerebellum_Interneuron_phastCons_by_cluster_and_pleiotropy.pdf", width = 7, height = 4, useDingbats = F); grid.arrange(p1, p2, ncol=1, heights=c(3, 1)) ; dev.off()
+
+```
+
+Now we can see if the overlap is higher between specific clusters
+
+```{r, fig.width=8, fig.height=8}
+## GC to PC
+gc_pc <- full_join(data.frame(peak=names(clust.peaks.GC$cluster),
+                                       GC_clust=paste0("GC", clust.peaks.GC$cluster), stringsAsFactors = F),
+                            data.frame(peak=names(clust.peaks.PC$cluster),
+                                       PC_clust=paste0("PC",clust.peaks.PC$cluster), stringsAsFactors = F)) %>%
+  group_by(GC_clust, PC_clust) %>%
+  dplyr::count() %>%
+  filter(is.na(PC_clust)==F, is.na(GC_clust)==F) %>%
+  spread(key = PC_clust, value = n, fill = 0) %>%
+  column_to_rownames("GC_clust") %>%
+  as.matrix()
+
+## GC to interneuron
+gc_inter <- full_join(data.frame(peak=names(clust.peaks.GC$cluster),
+                                       GC_clust=paste0("GC", clust.peaks.GC$cluster), stringsAsFactors = F),
+                            data.frame(peak=names(clust.peaks.Interneuron$cluster),
+                                       Interneuron_clust=paste0("Interneuron",clust.peaks.Interneuron$cluster), stringsAsFactors = F)) %>%
+  group_by(GC_clust, Interneuron_clust) %>%
+  dplyr::count() %>%
+  filter(is.na(GC_clust)==F, is.na(Interneuron_clust)==F) %>%
+  spread(key = Interneuron_clust, value = n, fill = 0) %>%
+  column_to_rownames("GC_clust") %>%
+  as.matrix()
+
+## PC to interneuron
+pc_inter <- full_join(data.frame(peak=names(clust.peaks.PC$cluster),
+                                       PC_clust=paste0("PC", clust.peaks.PC$cluster), stringsAsFactors = F),
+                            data.frame(peak=names(clust.peaks.Interneuron$cluster),
+                                       Interneuron_clust=paste0("Interneuron",clust.peaks.Interneuron$cluster), stringsAsFactors = F)) %>%
+  group_by(PC_clust, Interneuron_clust) %>%
+  dplyr::count() %>%
+  filter(is.na(PC_clust)==F, is.na(Interneuron_clust)==F) %>%
+  spread(key = Interneuron_clust, value = n, fill = 0) %>%
+  column_to_rownames("PC_clust") %>%
+  as.matrix()
+
+## Putting matrices together
+mat = matrix(0, nrow = length(c(rownames(gc_pc), rownames(pc_inter))), ncol = length(c(colnames(gc_pc), colnames(gc_inter))))
+rownames(mat) = c(rownames(gc_pc), rownames(pc_inter))
+colnames(mat) = c(colnames(gc_pc), colnames(gc_inter))
+mat[rownames(gc_pc), colnames(gc_pc)] = gc_pc
+mat[rownames(gc_inter), colnames(gc_inter)] = gc_inter
+mat[rownames(pc_inter), colnames(pc_inter)] = pc_inter
+mat
+
+## Ordering clusters from early to late differentiation within a lineage (as previously determined for each lineage)
+gc_order <- paste0("GC", c(2,3,1,5,6,4,7))
+pc_order <- paste0("PC", c(3,1,4,5,2))
+inter_order <- paste0("Interneuron", c(5,4,2,1,3))
+
+mat <- mat[c(gc_order, pc_order), c(pc_order, inter_order)]
+
+grid.col <- c(RColorBrewer::brewer.pal(n = 7,name = "Spectral"),
+              RColorBrewer::brewer.pal(n = 5,name = "Spectral"),
+              RColorBrewer::brewer.pal(n = 5,name = "Spectral"))
+
+circos.par(gap.after = c(c(rep(1, 6), 8), c(rep(1, 4), 8), c(rep(1, 4), 8)))
+chordDiagram(mat, annotationTrack = "grid", grid.col = grid.col, transparency = 0.3,
+    preAllocateTracks = list(
+        track.height = uh(4, "mm"),
+        track.margin = c(uh(4, "mm"), 0)
+))
+circos.track(track.index = 2, panel.fun = function(x, y) {
+    sector.index = get.cell.meta.data("sector.index")
+    xlim = get.cell.meta.data("xlim")
+    ylim = get.cell.meta.data("ylim")
+    circos.text(mean(xlim), mean(ylim), sector.index, cex = 0.6, niceFacing = TRUE)
+}, bg.border = NA)
+
+highlight.sector(rownames(gc_pc), track.index = 1, col = "#238a04", 
+    text = "GC", cex = 0.8, text.col = "white", niceFacing = TRUE)
+highlight.sector(colnames(gc_pc), track.index = 1, col = "#3b4ea7", 
+    text = "PC", cex = 0.8, text.col = "white", niceFacing = TRUE)
+highlight.sector(colnames(gc_inter), track.index = 1, col = "#d83d2f", 
+    text = "Interneuron", cex = 0.8, text.col = "white", niceFacing = TRUE)
+
+pdf("~/Mouse_Cereb/Figures/007_withinLineages/Integrative/Mouse_Cerebellum_sigPeaks_inDiff_chorDiagram_nodesAreConnections_notPeaks.pdf", width = 8, height = 8, useDingbats = F);
+circos.par(gap.after = c(c(rep(1, 6), 8), c(rep(1, 4), 8), c(rep(1, 4), 8)))
+chordDiagram(mat, annotationTrack = "grid", grid.col = grid.col, transparency = 0.3,
+    preAllocateTracks = list(
+        track.height = uh(4, "mm"),
+        track.margin = c(uh(4, "mm"), 0)
+))
+circos.track(track.index = 2, panel.fun = function(x, y) {
+    sector.index = get.cell.meta.data("sector.index")
+    xlim = get.cell.meta.data("xlim")
+    ylim = get.cell.meta.data("ylim")
+    circos.text(mean(xlim), mean(ylim), sector.index, cex = 0.6, niceFacing = TRUE)
+}, bg.border = NA)
+
+highlight.sector(rownames(gc_pc), track.index = 1, col = "#238a04", 
+    text = "GC", cex = 0.8, text.col = "white", niceFacing = TRUE)
+highlight.sector(colnames(gc_pc), track.index = 1, col = "#3b4ea7", 
+    text = "PC", cex = 0.8, text.col = "white", niceFacing = TRUE)
+highlight.sector(colnames(gc_inter), track.index = 1, col = "#d83d2f", 
+    text = "Interneuron", cex = 0.8, text.col = "white", niceFacing = TRUE); dev.off()
+```
+
+### Important note on this diagram: Each node represents a connection, not a peak. This means that 3-way shared peaks will be represented twice in the diagram!
+
+We see that early peaks primarily match early peaks in other cell types as well.
+
+Let's do the stats
+
+```{r}
+gc_inter_alig <- gc_inter[gc_order, inter_order]
+
+gc_inter_ji <- do.call(rbind,lapply(1:nrow(gc_inter_alig), function(i) {
+  sapply(1:ncol(gc_inter_alig), function(j) {
+    ji <- gc_inter_alig[i,j] / (sum(gc_inter_alig[i,]) + sum(gc_inter_alig[,j]))
+  })
+}))
+
+pheatmap::pheatmap(gc_inter_ji, cluster_rows = F, cluster_cols = F)
+
+gc_inter_hyper <- do.call(rbind,lapply(1:nrow(gc_inter_alig), function(i) {
+  sapply(1:ncol(gc_inter_alig), function(j) {
+    p <- phyper(q=gc_inter_alig[i,j],
+                m=sum(gc_inter_alig[i,]),
+                n=sum(gc_inter_alig[-i,]),
+                k=sum(gc_inter_alig[,j]), lower.tail = F
+                )
+  })
+}))
+
+pheatmap::pheatmap(-log10(gc_inter_hyper + 1e-50), cluster_rows = F, cluster_cols = F)
+```
+
+```{r, fig.width=2, fig.height=2}
+gc_pc_alig <- gc_pc[gc_order, pc_order]
+
+gc_pc_ji <- do.call(rbind,lapply(1:nrow(gc_pc_alig), function(i) {
+  sapply(1:ncol(gc_pc_alig), function(j) {
+    ji <- gc_pc_alig[i,j] / (sum(gc_pc_alig[i,]) + sum(gc_pc_alig[,j]))
+  })
+}))
+
+pheatmap::pheatmap(gc_pc_ji, cluster_rows = F, cluster_cols = F)
+
+gc_pc_hyper <- do.call(rbind,lapply(1:nrow(gc_pc_alig), function(i) {
+  sapply(1:ncol(gc_pc_alig), function(j) {
+    p <- phyper(q=gc_pc_alig[i,j],
+                m=sum(gc_pc_alig[i,]),
+                n=sum(gc_pc_alig[-i,]),
+                k=sum(gc_pc_alig[,j]), lower.tail = F
+                )
+  })
+}))
+
+pheatmap::pheatmap(-log10(gc_pc_hyper + 1e-50), cluster_rows = F, cluster_cols = F)
+```
+
+```{r}
+pc_inter_alig <- pc_inter[pc_order, inter_order]
+
+pc_inter_ji <- do.call(rbind,lapply(1:nrow(pc_inter_alig), function(i) {
+  sapply(1:ncol(pc_inter_alig), function(j) {
+    ji <- pc_inter_alig[i,j] / (sum(pc_inter_alig[i,]) + sum(pc_inter_alig[,j]))
+  })
+}))
+
+pheatmap::pheatmap(pc_inter_ji, cluster_rows = F, cluster_cols = F)
+
+pc_inter_hyper <- do.call(rbind,lapply(1:nrow(pc_inter_alig), function(i) {
+  sapply(1:ncol(pc_inter_alig), function(j) {
+    p <- phyper(q=pc_inter_alig[i,j],
+                m=sum(pc_inter_alig[i,]),
+                n=sum(pc_inter_alig[-i,]),
+                k=sum(pc_inter_alig[,j]), lower.tail = F
+                )
+  })
+}))
+
+pheatmap::pheatmap(-log10(pc_inter_hyper + 1e-50), cluster_rows = F, cluster_cols = F)
+```
+
+As a next step, we can also investigate the global similarities and differences of the three lineages during differentiation (based on all peaks rather than the significant ones).
+
+For that we can simply use the pseudotime bin pseudobulks and run a simple PCA on them.
+
+```{r}
+GC.pseudobulk <- read.table("~/Mouse_Cereb/015_withinLineages/GC/Mouse_withinGC_lineage_pseudotime_bins_peaks_pseudobulk.txt", header = T, sep = "\t", stringsAsFactors = F)
+PC.pseudobulk <- read.table("~/Mouse_Cereb/015_withinLineages/PC/Mouse_withinPC_lineage_pseudotime_bins_peaks_pseudobulk.txt", header = T, sep = "\t", stringsAsFactors = F)
+inter.pseudobulk <- read.table("~/Mouse_Cereb/015_withinLineages/Interneuron/Mouse_withinInterneuron_lineage_pseudotime_bins_peaks_pseudobulk.txt", header = T, sep = "\t", stringsAsFactors = F)
+
+colnames(GC.pseudobulk) <- paste0("GC_", 1:ncol(GC.pseudobulk))
+colnames(PC.pseudobulk) <- paste0("PC_", 1:ncol(PC.pseudobulk))
+colnames(inter.pseudobulk) <- paste0("inter_", 1:ncol(inter.pseudobulk))
+
+all.pseudobulk <- Reduce(bind_cols, list(GC.pseudobulk, PC.pseudobulk, inter.pseudobulk))
+
+summary(rowSums(all.pseudobulk))
+
+hist(rowSums(all.pseudobulk > 0))
+```
+
+We seem to be able to use all peaks.
+
+Let's run VST normalisation, then PCA on the pseudobulks.
+
+```{r}
+all.pseudobulk.vst <- DESeq2::varianceStabilizingTransformation(as.matrix(all.pseudobulk))
+
+dim(all.pseudobulk.vst)
+summary(colSums(all.pseudobulk.vst))
+
+all.pca <- PCA(t(all.pseudobulk.vst), graph = F)
+
+PC1 <- all.pca$ind$coord[,1]
+PC2 <- all.pca$ind$coord[,2]
+PC3 <- all.pca$ind$coord[,3]
+PC4 <- all.pca$ind$coord[,4]
+PC5 <- all.pca$ind$coord[,5]
+labs <- rownames(all.pca$ind$coord)
+PCs <- data.frame(cbind(PC1,PC2,PC3,PC4,PC5))
+rownames(PCs) <- labs
+
+PCs <-rownames_to_column(PCs, var="sample") %>%
+  separate(sample, into=c("cell_type", "pseudotime"), remove = F) %>%
+  mutate(pseudotime=as.numeric(pseudotime))
+
+fviz_screeplot(all.pca, ncp=10) + theme_classic()
+
+ggplot(PCs, aes(PC1, PC2, color=cell_type, size=pseudotime)) +
+  geom_point() +
+  scale_color_manual(values = c("#238a04", "#d83d2f", "#3b4ea7"), name="Cell type") +
+  scale_size(range = c(0, 3), name = "pseudotime\nbin") +
+  coord_fixed() +
+  theme_classic()
+
+pdf("~/Mouse_Cereb/Figures/007_withinLineages/Integrative/Mouse_Cerebellum_integrate_pseudotime_allPeaks_PCA.pdf", width = 6, height = 5, useDingbats = F); print(
+ggplot(PCs, aes(PC1, PC2, color=cell_type, size=pseudotime)) +
+  geom_point() +
+  scale_color_manual(values = c("#238a04", "#d83d2f", "#3b4ea7"), name="Cell type") +
+  scale_size(range = c(0, 3), name = "pseudotime\nbin") +
+  coord_fixed() +
+  theme_classic()
+);dev.off()
+```
+
+```{r}
+sessionInfo()
+```
+

@@ -1,0 +1,456 @@
+---
+title: "Identifying genes with cell type- and temporal- variance in progenitor cells"
+output: html_document
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(Matrix)
+  library(viridis)
+  library(RColorBrewer)
+  library(Mfuzz)
+  library(SummarizedExperiment)
+})
+```
+
+The goal of this analysis is to identify genes that show coordinated temporal change across progenitor types.
+
+Such genes should show low variance when we compare cell types from the same stage and high variance when we compare developmental stages to each other.
+
+We should scale both estimates by the variance across replicates to make sure we only focus on reproducible genes.
+
+##1. Preparing the input: Pseudobulks by progenitor type, stage and library
+
+```{r}
+gs_mat <- readRDS("~/Mouse_Cereb/003_finalNucSet/Mouse_Cereb_finalNucSet_GeneScoreMatrix_SE.rds")
+
+cell_anno <- readRDS("~/Mouse_Cereb/004_cellTypes_broad/Mouse_Cerebellum_atac_finalCellType_annotation.rds")
+cell_anno$Cell_type_color <- as.character(cell_anno$Cell_type_color)
+cell_anno$Cell_type <- as.character(cell_anno$Cell_type)
+cell_anno$Cell_type_color[cell_anno$Cell_type=="Progenitor_VZ"] <- "#A1BBE1"
+cell_anno$Cell_type_color[cell_anno$Cell_type=="Progenitor_anteriorVZ"] <- "#795ad6"
+cell_anno$Cell_type <- factor(cell_anno$Cell_type, levels = unique(cell_anno$Cell_type))
+cell_anno$Cell_type_color <- factor(cell_anno$Cell_type_color, levels = unique(cell_anno$Cell_type_color))
+```
+
+Focusing on progenitor cells.
+
+We are excluding astroblasts and mature astrocytes and Bergmann glia, as well as brainstem progenitors which are overall very different from the cerebellar cells.
+
+```{r}
+## Determining how many cells we have for each pseudobulk
+cell_counts <- filter(cell_anno, Cell_type_broad == "Astroglia", !(Timepoint %in% c("P14", "P63"))) %>%
+  filter(grepl("astroblast|brainstem", Cell_type)==F)%>%
+  group_by(Cell_type, Timepoint, Lib) %>%
+  dplyr::count() %>%
+  mutate(sample=paste(Cell_type, Timepoint, Lib, sep = "-"))
+
+## Number of pseudobulk samples
+nrow(cell_counts)
+
+## Number of cells per pseudobulk
+hist(log10(cell_counts$n), breaks = 20)
+
+## Pseudobulks with at least 50 cells (per replicate)
+sum(cell_counts$n >= 50)
+
+cell_counts$sample[cell_counts$n >= 50]
+
+## Pseudobulks to do:
+cell_counts.filtered <- filter(cell_counts, n >=50)
+
+print(cell_counts.filtered$sample)
+```
+
+Now aggregating counts in each pseudobulk.
+
+```{r}
+pseudobulks <- do.call(cbind, parallel::mclapply(1:nrow(cell_counts.filtered), function(i){
+  cells <- cell_anno$cell[cell_anno$Cell_type==cell_counts.filtered$Cell_type[i] & cell_anno$Timepoint == cell_counts.filtered$Timepoint[i] & cell_anno$Lib == cell_counts.filtered$Lib[i]]
+  pseudo <- Matrix::rowMeans(assay(gs_mat[, cells])) ## Since gene scores are already scaled we can simply take the mean across cells
+  return(pseudo)
+}, mc.cores = 10))
+
+colnames(pseudobulks) <- unique(cell_counts.filtered$sample)
+row.names(pseudobulks) <- gs_mat@elementMetadata$name
+
+## Data are already scaled, simply multiplying by 100 to convert to CPM
+pseudobulks <- pseudobulks * 1e2
+
+write.table(pseudobulks, "~/Mouse_Cereb/Revisions/006_Progenitors/Mouse_progenitors_by_timepointAndLib_GeneScorePseudobulk_cpm.txt", row.names = T, col.names = T, quote = F, sep = "\t")
+```
+
+Since our progenitor types are restricted to specific stages, it makes most sense to split the analysis into early (e10-e13) and late (e15-P0) progenitor groups (we focus on e15-P0, which is the period when bipotent and gliogenic progenitors are both quite abundant).
+
+##2. Early progenitors 
+
+Focusing on early progenitors
+
+```{r, warning=FALSE,message=FALSE}
+dim(pseudobulks)
+
+prog_early <- filter(cell_counts.filtered, Cell_type %in% c("Progenitor", "Progenitor_anteriorVZ", "Progenitor_VZ", "Progenitor_RL", "Progenitor_isthmic"), Timepoint %in% c("e10", "e11", "e12", "e13"))
+
+prog_early_pseudobulks <- pseudobulks[, prog_early$sample]
+
+sum(prog_early$sample == colnames(prog_early_pseudobulks))
+prog_early$Timepoint <- factor(prog_early$Timepoint)
+
+hist(log10(rowVars(prog_early_pseudobulks) + 1), breaks = 100)
+
+sort(rowVars(prog_early_pseudobulks), decreasing = T)[2000]
+
+HVG_early <- prog_early_pseudobulks[rowVars(prog_early_pseudobulks) >=sort(rowVars(prog_early_pseudobulks), decreasing = T)[2000], ]
+
+HVG_early_stats <- Reduce(bind_rows,lapply(row.names(HVG_early), function(x) {
+  g <- prog_early_pseudobulks[x,]
+
+  g.df <- data.frame(cpm=g, sample=colnames(prog_early_pseudobulks)) %>%
+  separate(sample, into = c("Cell_type", "Timepoint", "Lib"), sep = "-", remove = F)
+
+  g.df_byCellType <- group_by(g.df, Cell_type) %>%
+  summarise(cpm=mean(cpm))
+
+  g.df_byTimepoint <- group_by(g.df, Timepoint) %>%
+  summarise(cpm=mean(cpm))
+  
+  g.df_byLib <- group_by(g.df, Timepoint, Cell_type) %>%
+  summarise(sd=sd(cpm))
+
+  
+  df <- data.frame(gene=x, 
+                   cell_type_sd=sd(g.df_byCellType$cpm),
+                   time_sd=sd(g.df_byTimepoint$cpm),
+                   rep_sd=mean(g.df_byLib$sd),
+                   stringsAsFactors = F)
+
+  return(df)
+}))
+
+
+HVG_early_stats$t2ct <- HVG_early_stats$time_sd/HVG_early_stats$cell_type_sd
+HVG_early_stats$t2rep <- HVG_early_stats$time_sd/HVG_early_stats$rep_sd
+HVG_early_stats$ct2rep <- HVG_early_stats$cell_type_sd/HVG_early_stats$rep_sd
+
+fc_cutoff <- 1.25
+
+p <- ggplot(HVG_early_stats, aes(x=log2(t2rep +1), y=log2(ct2rep +1))) +
+  geom_point(alpha=0.5, size=0.5, color="gray50") +
+  geom_point(data = filter(HVG_early_stats, log2(t2ct) >= fc_cutoff & log2(t2rep) >=fc_cutoff), color="darkorange", size=1) +
+  geom_text(data = filter(HVG_early_stats, log2(t2ct) >= fc_cutoff & log2(t2rep) >=fc_cutoff), aes(label=gene), color="black", check_overlap = T,  nudge_x = 0.2) +
+      geom_point(data = filter(HVG_early_stats, gene %in% c("Pax5", "Ptf1a", "Cdon", "Atoh1", "Gsx1", "Fgf17", "Olig1", "Olig2")), color="seagreen", size=1) +
+  geom_text(data = filter(HVG_early_stats, gene %in% c("Pax5", "Ptf1a", "Cdon", "Atoh1", "Gsx1", "Fgf17", "Olig1", "Olig2")), aes(label=gene), color="seagreen", check_overlap = F,  nudge_x = 0.2) +
+  geom_point(data = filter(HVG_early_stats, log2(t2ct) <= (-1) * fc_cutoff & log2(ct2rep) >=fc_cutoff), color="deepskyblue3", size=1) +
+    geom_text(data = filter(HVG_early_stats, log2(t2ct) <= (-1) * fc_cutoff & log2(ct2rep) >=fc_cutoff), aes(label=gene), color="black", check_overlap = T, nudge_x = 0.2) +
+  theme_bw() +
+  coord_fixed() +
+  xlab("Dev.stage/rep (log2 sd)") +
+  ylab("Progenitor type/rep (log2 sd)") +
+  geom_abline(intercept = 0, slope = 1, color="red", lty="dashed") +
+  theme_bw()
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/006_Progenitors_early_HVG.pdf", width = 6, height = 6, useDingbats = F); print(p); dev.off()
+
+timeHVG_early <- filter(HVG_early_stats, log2(t2ct) >= fc_cutoff & log2(t2rep) >= fc_cutoff)
+
+nrow(timeHVG_early)
+
+timeHVG_early$score <- timeHVG_early$t2ct * timeHVG_early$t2rep
+```
+
+Most of these genes can be classified into up-and down regulated:
+
+```{r}
+clustGenes <- function(pseudobulk, genes, nClust=2, plotName="~/Mouse_Cereb/Revisions/Figures/006_Progenitors_early_TempClust.pdf") {
+ pseud <- pseudobulk[genes,]
+
+  pseud_byTimepoint <- as.data.frame(pseud) %>%
+      rownames_to_column("gene") %>%
+      gather(-gene, key = "sample", value = "cpm") %>%
+      separate(sample, into = c("cell_type", "timepoint", "rep"), sep = "-") %>%
+      group_by(timepoint, gene) %>%
+      summarise(cpm=mean(cpm)) %>%
+      spread(key = timepoint, value = cpm) %>%
+      column_to_rownames("gene") %>%
+      as.matrix()
+    
+    ## Constructing an eset object
+    pseud_byTimepoint <- ExpressionSet(pseud_byTimepoint)
+    
+    ## Standardising (essentially substracting the mean and dividing by standard deviation).
+    pseud_byTimepoint.s <- standardise(pseud_byTimepoint)
+    
+    m1 <- mestimate(pseud_byTimepoint.s)
+  
+    ## Clustering (2 clusters only)
+    set.seed(1)
+    temp_clust <- mfuzz(pseud_byTimepoint.s,c=2,m=m1)
+    
+    mfuzz.plot2(pseud_byTimepoint.s, temp_clust, colo = "fancy", x11 = F, centre = T, mfrow = c(2,2))
+    table(temp_clust$cluster)
+    
+    pdf(plotName, width = 5, height = 3, useDingbats = F); print(
+mfuzz.plot2(pseud_byTimepoint.s, temp_clust, colo = "fancy", x11 = F, centre = T, mfrow = c(1,2))
+); dev.off()
+    
+    ## Classifying clusters into up/down based on their centers:
+    clust_up <- which.min(temp_clust$centers[,1])
+    
+    ## Creating table with summary info
+    df <- data.frame(gene=names(temp_clust$cluster),
+                     cluster=temp_clust$cluster,
+                     membership=sapply(1:nrow(temp_clust$membership), function(i) temp_clust$membership[i, temp_clust$cluster[i]]),
+                     stringsAsFactors = F) %>%
+      mutate(direction=ifelse(cluster == clust_up, yes = "up", no = "down"))
+    
+    #df$cluster[df$membership < 0.70] <- NA
+    #df$direction[df$membership < 0.70] <- NA 
+    
+    return(df)
+}
+
+early_clust <- clustGenes(prog_early_pseudobulks, timeHVG_early$gene)
+early_clust$prog_stage <- "early"
+```
+
+##3. Late progenitors
+
+Doing the same with late progenitors:
+
+```{r, warning=FALSE,message=FALSE}
+prog_late <- filter(cell_counts.filtered, Cell_type %in% c("Progenitor_bipotent", "Progenitor_gliogenic"), Timepoint %in% c("e15", "e17", "P0"))
+
+prog_late_pseudobulks <- pseudobulks[, prog_late$sample]
+
+sum(prog_late$sample == colnames(prog_late_pseudobulks))
+
+hist(log10(rowVars(prog_late_pseudobulks) + 1), breaks = 100)
+
+sort(rowVars(prog_late_pseudobulks), decreasing = T)[2000]
+
+HVG_late <- prog_late_pseudobulks[rowVars(prog_late_pseudobulks) >=sort(rowVars(prog_late_pseudobulks), decreasing = T)[2000], ]
+
+HVG_late_stats <- Reduce(bind_rows,lapply(row.names(HVG_late), function(x) {
+  g <- prog_late_pseudobulks[x,]
+
+  g.df <- data.frame(cpm=g, sample=colnames(prog_late_pseudobulks)) %>%
+  separate(sample, into = c("Cell_type", "Timepoint", "Lib"), sep = "-", remove = F)
+
+  g.df_byCellType <- group_by(g.df, Cell_type) %>%
+  summarise(cpm=mean(cpm))
+
+  g.df_byTimepoint <- group_by(g.df, Timepoint) %>%
+  summarise(cpm=mean(cpm))
+  
+  g.df_byLib <- group_by(g.df, Timepoint, Cell_type) %>%
+  summarise(sd=sd(cpm))
+
+  
+  df <- data.frame(gene=x, 
+                   cell_type_sd=sd(g.df_byCellType$cpm),
+                   time_sd=sd(g.df_byTimepoint$cpm),
+                   rep_sd=mean(g.df_byLib$sd),
+                   stringsAsFactors = F)
+
+  return(df)
+}))
+
+
+HVG_late_stats$t2ct <- HVG_late_stats$time_sd/HVG_late_stats$cell_type_sd
+HVG_late_stats$t2rep <- HVG_late_stats$time_sd/HVG_late_stats$rep_sd
+HVG_late_stats$ct2rep <- HVG_late_stats$cell_type_sd/HVG_late_stats$rep_sd
+
+fc_cutoff <- 1.25
+
+p <- ggplot(HVG_late_stats, aes(x=log2(t2rep +1), y=log2(ct2rep +1))) +
+  geom_point(alpha=0.5, size=0.5, color="gray50") +
+  geom_point(data = filter(HVG_late_stats, log2(t2ct) >= fc_cutoff & log2(t2rep) >=fc_cutoff), color="darkorange", size=1) +
+  geom_text(data = filter(HVG_late_stats, log2(t2ct) >= fc_cutoff & log2(t2rep) >=fc_cutoff), aes(label=gene), color="black", check_overlap = T, nudge_x = 0.2) +
+      geom_point(data = filter(HVG_late_stats, gene %in% c("Gsx1","Wnt8b" ,"Slc1a3", "Gdf10", "Grm3", "Tnc", "Olig2")), color="seagreen", size=1) +
+  geom_text(data = filter(HVG_late_stats, gene %in% c("Gsx1","Wnt8b" ,"Slc1a3", "Gdf10", "Grm3", "Tnc", "Olig2")), aes(label=gene), color="seagreen", check_overlap = F, nudge_x = 0.2) +
+  geom_point(data = filter(HVG_late_stats, log2(t2ct) <= (-1) * fc_cutoff & log2(ct2rep) >=fc_cutoff), color="deepskyblue3", size=1) +
+    geom_text(data = filter(HVG_late_stats, log2(t2ct) <= (-1) * fc_cutoff & log2(ct2rep) >=fc_cutoff), aes(label=gene), color="black", check_overlap = T, nudge_x = 0.2) +
+  theme_bw() +
+  coord_fixed() +
+  xlab("Dev.stage/rep (log2 sd)") +
+  ylab("Progenitor type/rep (log2 sd)") +
+  geom_abline(intercept = 0, slope = 1, color="red", lty="dashed") +
+  theme_bw()
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/006_Progenitors_late_HVG.pdf", width = 6, height = 6, useDingbats = F); print(p); dev.off()
+
+timeHVG_late <- filter(HVG_late_stats, log2(t2ct) >= fc_cutoff & log2(t2rep) >= fc_cutoff)
+
+nrow(timeHVG_late)
+
+timeHVG_late$score <- timeHVG_late$t2ct * timeHVG_late$t2rep
+```
+
+Also clustering:
+
+```{r}
+late_clust <- clustGenes(prog_late_pseudobulks, timeHVG_late$gene, plotName = "~/Mouse_Cereb/Revisions/Figures/006_Progenitors_late_TempClust.pdf")
+late_clust$prog_stage <- "late"
+```
+
+##4. Comparison of temporal effects in early vs late progenitors:
+
+```{r}
+HVG_early_stats$stage <- "early"
+HVG_late_stats$stage <- "late"
+
+HVG_both <- bind_rows(HVG_early_stats, HVG_late_stats)
+
+
+p <- ggplot(HVG_both, aes(log2(t2ct), fill=stage, color=stage)) +
+  geom_density(alpha=0.2, lwd=1) +
+  geom_vline(xintercept = 0, lty="dashed", color="gray30") +
+  geom_vline(xintercept = median(log2(HVG_both$t2ct[HVG_both$stage=="early"])), lty="dashed", color="indianred") +
+  geom_vline(xintercept = median(log2(HVG_both$t2ct[HVG_both$stage=="late"])), lty="dashed", color="steelblue") +
+  scale_fill_manual(values = c("indianred", "steelblue")) +
+  scale_color_manual(values = c("indianred", "steelblue")) +
+  xlab("Dev.stage/Progenitor type (log2 sd)") +
+  theme_classic()
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/006_Progenitors_TimeVariance_earlyVsLate.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+
+wilcox.test(log2(HVG_both$t2ct[HVG_both$stage=="early"]), log2(HVG_both$t2ct[HVG_both$stage=="late"]))
+```
+
+##5. Expression in Vladoiu data
+
+Now we can check how these estimates compare to the RNA expression of these genes in the Vladoiu data:
+
+```{r}
+vladoiu_anno <- read_tsv("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_cell_type_annotation.txt")
+
+table(vladoiu_anno$Vladoiu_cell_type, vladoiu_anno$timepoint)
+
+vladoiu_prog_early <- filter(vladoiu_anno, Vladoiu_cell_type %in% c("Early proliferating VZ progenitors", "Neural stem cells", "Proliferating VZ progenitors", "Roof plate-like stem cells", "Upper rhombic lip progenitors", "VZ progenitors"),
+                             timepoint %in% c("E10", "E12", "E14")) 
+
+
+vladoiu_early_fraction <- Reduce(bind_rows,lapply(unique(early_clust$direction), function(c) {
+  c_fraction <- Reduce(bind_rows, lapply(c("GSM3317999_E10", "GSM3318000_E12", "GSM3318001_E14"), function(t) {
+  ## Reading in the data
+  rna.data <- readMM(paste0("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_data/",t,"_matrix.mtx"))
+  colnames(rna.data) <- readLines(paste0("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_data/",t,"_barcodes.tsv"))
+  ## Adding the timepoint info to the barcodes
+  vladoiu_t <- str_split(t, "_", simplify = T)[2]
+  colnames(rna.data) <- paste(vladoiu_t, colnames(rna.data), sep = "_")
+## Also stripping the "-1" ending
+colnames(rna.data) <- gsub("-1", "",colnames(rna.data))
+  rna.genes <- read_tsv(paste0("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_data/",t,"_genes.tsv"), col_names = F)
+  row.names(rna.data) <- rna.genes$X2
+  
+  ## Subsetting for the cells of interest
+  rna.data <- rna.data[, vladoiu_prog_early$cell[vladoiu_prog_early$timepoint==vladoiu_t]]
+  
+  ## Calculating fraction of reads in target genes of cluster
+  comm.genes <- intersect(early_clust$gene[early_clust$direction==c], row.names(rna.data))
+  f <- Matrix::colSums(rna.data[comm.genes,])/Matrix::colSums(rna.data)
+  ## Putting in a dataframe and return
+  df <- data.frame(cell=colnames(rna.data), f, stringsAsFactors = F)
+  return(df)
+}))
+  c_fraction$direction <- c
+  return(c_fraction)
+}))
+
+vladoiu_early_fraction <- left_join(vladoiu_early_fraction, vladoiu_anno)
+
+p <- ggplot(vladoiu_early_fraction, aes(x=timepoint, y=f, fill=timepoint)) +
+  geom_boxplot(notch = T)+
+  theme_classic() +
+  ylab("Fraction of UMIs in temporally dynamic genes") +
+  scale_fill_manual(values = brewer.pal(name = "Spectral", n=4)) +
+  facet_wrap(~as.factor(direction), scales = "free_y", nrow = 1)+
+  theme(legend.position = "top")
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/006_Progenitors_earlyDynamic_Vladoiu_TimeOnly.pdf", width = 5, height = 4, useDingbats = F); print(p); dev.off()
+
+```
+
+```{r}
+vladoiu_prog_late <- filter(vladoiu_anno, Vladoiu_cell_type %in% c("VZ progenitors", "Gliogenic progenitors-1", "Gliogenic progenitors-2"),
+                            timepoint %in% c("E14","E16", "E18", "P0"))
+
+vladoiu_late_fraction <- Reduce(bind_rows,lapply(unique(late_clust$direction), function(c) {
+  c_fraction <- Reduce(bind_rows, lapply(c("GSM3318001_E14", "GSM3318002_E16", "GSM3318003_E18", "GSM3318004_P0"), function(t) {
+  ## Reading in the data
+  rna.data <- readMM(paste0("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_data/",t,"_matrix.mtx"))
+  colnames(rna.data) <- readLines(paste0("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_data/",t,"_barcodes.tsv"))
+  ## Adding the timepoint info to the barcodes
+  vladoiu_t <- str_split(t, "_", simplify = T)[2]
+  colnames(rna.data) <- paste(vladoiu_t, colnames(rna.data), sep = "_")
+## Also stripping the "-1" ending
+colnames(rna.data) <- gsub("-1", "",colnames(rna.data))
+  rna.genes <- read_tsv(paste0("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_data/",t,"_genes.tsv"), col_names = F)
+  row.names(rna.data) <- rna.genes$X2
+  
+  ## Subsetting for the cells of interest
+  rna.data <- rna.data[, vladoiu_prog_late$cell[vladoiu_prog_late$timepoint==vladoiu_t]]
+  
+  ## Calculating fraction of reads in target genes of cluster
+  comm.genes <- intersect(late_clust$gene[late_clust$direction==c], row.names(rna.data))
+  f <- Matrix::colSums(rna.data[comm.genes,])/Matrix::colSums(rna.data)
+  ## Putting in a dataframe and return
+  df <- data.frame(cell=colnames(rna.data), f, stringsAsFactors = F)
+  return(df)
+}))
+  c_fraction$direction <- c
+  return(c_fraction)
+}))
+
+vladoiu_late_fraction <- left_join(vladoiu_late_fraction, vladoiu_anno)
+
+p <- ggplot(vladoiu_late_fraction, aes(x=timepoint, y=f, fill=timepoint)) +
+  geom_boxplot(notch = T)+
+  theme_classic() +
+  ylab("Fraction of UMIs in temporally dynamic genes") +
+  scale_fill_manual(values = brewer.pal(name = "Spectral", n=4)) +
+  facet_wrap(~as.factor(direction), scales = "free_y", nrow = 1)+
+  theme(legend.position = "top")
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/006_Progenitors_lateDynamic_Vladoiu_TimeOnly.pdf", width = 5, height = 4, useDingbats = F); print(p); dev.off()
+
+```
+
+The scRNA-seq data validate our predictions from the gene score estimates!
+
+Let's export relevant data files:
+
+```{r}
+write_tsv(HVG_early_stats, "~/Mouse_Cereb/Revisions/006_Progenitors/Progenitors_early_HVG_all_stats.txt")
+
+write_tsv(HVG_late_stats,"~/Mouse_Cereb/Revisions/006_Progenitors/Progenitors_late_HVG_all_stats.txt")
+
+early_clust <- left_join(timeHVG_early, early_clust)
+write_tsv(early_clust, "~/Mouse_Cereb/Revisions/006_Progenitors/Progenitors_early_tempDynamicGenes.txt")
+
+late_clust <- left_join(timeHVG_late, late_clust)
+write_tsv(late_clust, "~/Mouse_Cereb/Revisions/006_Progenitors/Progenitors_late_tempDynamicGenes.txt")
+
+write_tsv(vladoiu_early_fraction, "~/Mouse_Cereb/Revisions/006_Progenitors/Progenitors_early_tempDynamicGenes_VladoiuUMIFractions.txt")
+write_tsv(vladoiu_late_fraction, "~/Mouse_Cereb/Revisions/006_Progenitors/Progenitors_late_tempDynamicGenes_VladoiuUMIFractions.txt")
+```
+
+```{r}
+sessionInfo()
+```
+
+
+

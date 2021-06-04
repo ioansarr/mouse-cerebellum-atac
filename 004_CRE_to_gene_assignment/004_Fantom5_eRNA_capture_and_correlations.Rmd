@@ -1,0 +1,285 @@
+---
+title: "FANTOM5 integration"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(GenomicRanges)
+  library(SummarizedExperiment)
+})
+```
+
+Here we want to integrate with the data from the FANTOM5 project.
+
+##1. Overlap with cerebellum peaks
+
+The expectation here is that we preferentially capture eRNAs active in the cerebellum.
+
+```{r}
+## Our ATAC peaks
+peak.info <- read_tsv("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt")
+
+peak.gr <- GRanges(seqnames = peak.info$chr,
+              ranges = IRanges(
+                start = peak.info$start,
+                end = peak.info$end))
+
+peak.gr$peak <- peak.info$peak
+```
+
+```{r}
+## eRNA coordinates
+eRNA.bed <- read_tsv("~/Resources/eRNA_Fantom5/F5.mm10.enhancers.bed", col_names = F)
+
+eRNA.gr <- GRanges(seqnames = eRNA.bed$X1,
+              ranges = IRanges(
+                start = eRNA.bed$X2,
+                end = eRNA.bed$X3))
+
+eRNA.gr$eRNA <- eRNA.bed$X4
+```
+
+Overlapping the two
+
+```{r}
+eRNA_overlaps <- findOverlaps(peak.gr, eRNA.gr)
+
+## Using all peaks
+length(eRNA_overlaps)
+length(unique(queryHits(eRNA_overlaps)))
+length(unique(subjectHits(eRNA_overlaps)))
+
+length(unique(subjectHits(eRNA_overlaps)))/length(eRNA.gr)
+length(unique(subjectHits(eRNA_overlaps)))/length(eRNA.gr)
+
+## Using robust peaks
+robust_i <- which(peak.gr$peak %in% peak.info$peak[peak.info$robust])
+length(unique(subjectHits(eRNA_overlaps[queryHits(eRNA_overlaps) %in% robust_i])))
+length(unique(subjectHits(eRNA_overlaps[queryHits(eRNA_overlaps) %in% robust_i])))/length(eRNA.gr)
+```
+
+We capture approximately 50% of their eRNAs (37% in robust peaks):
+
+The expectation is that these eRNAs will be more active in the cerebellum than in other tissues:
+
+```{r}
+mcols(eRNA.gr)$class <- "notFound"
+mcols(eRNA.gr[unique(subjectHits(eRNA_overlaps))])$class <- "permissive"
+mcols(eRNA.gr[unique(subjectHits(eRNA_overlaps[queryHits(eRNA_overlaps) %in% robust_i]))])$class <- "robust"           
+
+table(mcols(eRNA.gr)$class)
+```
+
+Activity matrix for eRNAs (we will use the binarised matrix that accounts for library noise).
+
+```{r}
+eRNA.mat <- read.table("~/Resources/eRNA_Fantom5/F5.mm10.enhancers.expression.usage.matrix", header = T, sep = "\t", stringsAsFactors = F)
+
+dim(eRNA.mat)
+
+colnames(eRNA.mat)
+
+summary(colSums(eRNA.mat))
+
+eRNA.sample.info <- read_tsv("~/Resources/eRNA_Fantom5/Mouse.sample_name2library_id.txt", col_names = c("description", "sample"))
+
+## Identifying samples associated with cerebellum
+eRNA.sample.info$class <- ifelse(grepl("cerebel|Granule cells", eRNA.sample.info$description),
+                                 yes = "cerebellum",
+                                 no = ifelse(grepl("brain|neur|astrocyte|microglia|medulla oblongata|hippocampus|pituitary|encephalon|spinal cord|eye|cortex|striatum", eRNA.sample.info$description, ignore.case = T) & grepl("embryonic stem cells", eRNA.sample.info$description)==F, 
+                                             yes ="other neural", 
+                                             no = ifelse(grepl("whole body, embryo", eRNA.sample.info$description),
+                                                         yes = "whole embryo" , no = "other")))
+
+eRNA.sample.info$class <- factor(eRNA.sample.info$class, levels = c("cerebellum", "other neural", "whole embryo", "other"))
+  
+table(eRNA.sample.info$class)
+```
+
+```{r, fig.width=2.5, fig.height=4.5}
+eRNA.stats <- data.frame(
+  sample=colnames(eRNA.mat),
+  totalEnhancers=colSums(eRNA.mat),
+  enhancersInRobust=colSums(eRNA.mat[eRNA.gr$eRNA[eRNA.gr$class=="robust"],]),
+  enhancersInPermissive=colSums(eRNA.mat[eRNA.gr$eRNA[eRNA.gr$class %in% c("robust", "permissive")],]),
+  stringsAsFactors = F
+) %>%
+  mutate(fractionInRobust=enhancersInRobust/totalEnhancers,
+         fractionInPermissive=enhancersInPermissive/totalEnhancers) %>%
+  left_join(eRNA.sample.info)
+
+summary(eRNA.stats$totalEnhancers)
+
+p <- ggplot(filter(eRNA.stats, totalEnhancers >= 200), aes(x=class, y=fractionInRobust, fill=class)) +
+  geom_boxplot(notch = T) + 
+  theme_classic() +
+  theme(axis.text.x = element_text(angle=45, hjust = 0.95)) +
+  xlab("") +
+  ylab("Fraction of active eRNAs in robust ATAC peaks") +
+  scale_fill_manual(values = c("#33CCFF", "dodgerblue3", "deeppink3", "gray"), guide=F)
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/003_FANTOM5_eRNAs_fractionInCerebellumCREs.pdf", width = 2.5, height = 4.5, useDingbats = F); print(p); dev.off()
+
+## Stats
+wilcox.test(eRNA.stats$fractionInRobust[eRNA.stats$class=="cerebellum"], eRNA.stats$fractionInRobust[eRNA.stats$class=="other neural"])
+
+wilcox.test(eRNA.stats$fractionInRobust[eRNA.stats$class=="other neural"], eRNA.stats$fractionInRobust[eRNA.stats$class=="whole embryo"])
+
+wilcox.test(eRNA.stats$fractionInRobust[eRNA.stats$class=="whole embryo"], eRNA.stats$fractionInRobust[eRNA.stats$class=="other"])
+
+## Fraction of eRNAs captured in peaks
+median(eRNA.stats$fractionInRobust[eRNA.stats$class=="cerebellum"])
+median(eRNA.stats$fractionInRobust[eRNA.stats$class=="other"])
+```
+
+We clearly see that we are enriching for eRNAs active in the cerebellum!
+
+##2. Correlation between eRNA and CAGE-TSS expression in cerebellum samples
+
+This might be very tricky given the differences in sensitivity between libraries (very different sequencing depths and number of active enhancers), which means that there is a lot of technical zeroes here!
+
+Let's look into the promoter data and see if the colSums are similar.
+
+```{r}
+summary(eRNA.stats$totalEnhancers[eRNA.stats$class=="cerebellum"])
+
+cage_mat <- read.table("~/Resources/eRNA_Fantom5/mm10_fair+new_CAGE_peaks_phase1and2_counts_ann.osc.txt", header = T, sep = "\t", stringsAsFactors = F)
+
+
+cage_anno <- cage_mat[, 1:7]
+cage_mat <- cage_mat[, 8:ncol(cage_mat)]
+row.names(cage_mat) <- cage_anno$X00Annotation
+colnames(cage_mat)[1:10]
+
+x <- str_extract(colnames(cage_mat), "CNhs[0-9]*")
+
+length(x)
+sum(x %in% eRNA.sample.info$sample)
+x[!(x %in% eRNA.sample.info$sample)]
+
+## Subsetting for samples were we have info
+colnames(cage_mat) <- str_extract(colnames(cage_mat), "CNhs[0-9]*")
+cage_mat <- cage_mat[, colnames(eRNA.mat)]
+
+cor(log10(colSums(eRNA.mat)), log10(colSums(cage_mat)))
+
+plot(log10(colSums(eRNA.mat)), log10(colSums(cage_mat)), pch=".")
+```
+
+Overlapping the CAGE peaks with our promoters
+
+```{r}
+prom.gr <- peak.gr[peak.gr$peak %in% peak.info$peak[peak.info$robust==T & peak.info$genomic_class=="protein_coding-Promoter"]]
+
+cage_bed <- read_tsv("~/Resources/eRNA_Fantom5/mm10_fair+new_CAGE_peaks_phase1and2.bed", col_names = F)
+cage.gr <- GRanges(seqnames = cage_bed$X1,
+              ranges = IRanges(
+                start = cage_bed$X2,
+                end = cage_bed$X3))
+
+mcols(cage.gr)$cage <- cage_bed$X4
+
+cage_prom_overlaps <- findOverlaps(prom.gr, cage.gr)
+length(cage_prom_overlaps)
+length(unique(queryHits(cage_prom_overlaps)))
+length(unique(subjectHits(cage_prom_overlaps)))
+```
+```{r}
+dim(cage_mat)
+
+sum(colnames(cage_mat) == colnames(eRNA.mat))
+
+## Estimating scaling factor based on full CAGE data
+sf <- edgeR::calcNormFactors(cage_mat, method="RLE")
+
+summary(colSums(cage_mat))
+
+cage_mat.tpm <- t(t(cage_mat) / colSums(cage_mat)) * 1e6
+cage_mat.tpm <- t(t(cage_mat.tpm) * sf)
+
+summary(colSums(cage_mat.tpm))
+```
+
+```{r}
+eRNA.expr.mat <- read.table("~/Resources/eRNA_Fantom5/F5.mm10.enhancers.expression.matrix", header = T, sep = "\t", stringsAsFactors = F)
+
+sum(colnames(cage_mat) == colnames(eRNA.expr.mat))
+
+eRNA.mat.tpm <- t(t(eRNA.expr.mat) / colSums(cage_mat)) * 1e6
+eRNA.mat.tpm <- t(t(eRNA.mat.tpm) * sf)
+
+summary(colSums(eRNA.mat.tpm))
+```
+
+Cerebellum samples to use for the correlations
+
+```{r}
+cereb_samples <- eRNA.stats$sample[grepl("cerebellum, embryo|cerebellum, neonate", eRNA.stats$description)]
+
+eRNA.mat.tpm.cerebellum <- eRNA.mat.tpm[eRNA.gr$eRNA[subjectHits(eRNA_overlaps)], cereb_samples]
+
+cage_mat.tpm.cerebellum <- cage_mat.tpm[cage.gr$cage[subjectHits(cage_prom_overlaps)], cereb_samples]
+
+dim(eRNA.mat.tpm.cerebellum)
+dim(cage_mat.tpm.cerebellum)
+```
+
+```{r}
+gene2peak.correlations <- readRDS("~/Mouse_Cereb/Revisions/002_cre2gene_assignment/CRE_to_gene_assignment_all_tests.rds")
+
+## Filter for pairs matching eRNAs and CAGE TSS
+eRNA.peaks <- peak.gr$peak[queryHits(eRNA_overlaps)]
+cage.prom <- prom.gr$peak[queryHits(cage_prom_overlaps)]
+
+gene2peak.correlations.inFantom <- filter(gene2peak.correlations, peak %in% eRNA.peaks, prom %in% cage.prom)
+
+nrow(gene2peak.correlations.inFantom)
+
+gene2peak.correlations.inFantom <- left_join(gene2peak.correlations.inFantom, 
+                                             data.frame(peak=peak.gr$peak[queryHits(eRNA_overlaps)],
+                                                        eRNA=eRNA.gr$eRNA[subjectHits(eRNA_overlaps)],
+                                                        stringsAsFactors = F)) %>%
+  left_join(data.frame(prom=prom.gr$peak[queryHits(cage_prom_overlaps)],
+                                                        cage=cage.gr$cage[subjectHits(cage_prom_overlaps)],
+                                                        stringsAsFactors = F))
+
+head(gene2peak.correlations.inFantom)
+
+## We should also filter out eRNAs or cage peaks with 0 activity in the cerebellum matrix
+gene2peak.correlations.inFantom <- filter(gene2peak.correlations.inFantom,
+                                          eRNA %in% row.names(eRNA.mat.tpm.cerebellum)[rowSums(eRNA.mat.tpm.cerebellum > 0) >= 2],
+                                          cage %in% row.names(cage_mat.tpm.cerebellum)[rowSums(cage_mat.tpm.cerebellum > 0) >= 2])
+
+nrow(gene2peak.correlations.inFantom)
+```
+
+```{r, fig.width=3, fig.height=4}
+gene2peak.correlations.inFantom$fantomCorr <- sapply(1:nrow(gene2peak.correlations.inFantom), function(i) {
+  cor(eRNA.mat.tpm.cerebellum[gene2peak.correlations.inFantom$eRNA[i],], 
+      cage_mat.tpm.cerebellum[gene2peak.correlations.inFantom$cage[i],])
+})
+
+summary(gene2peak.correlations.inFantom$fantomCorr)
+
+p <- ggplot(gene2peak.correlations.inFantom, aes(x=sig.interaction, y=fantomCorr, fill=sig.interaction)) +
+  geom_boxplot(notch = T) +
+  ylab("eRNA-TSS correlation in bulk\ndeveloping cerebellum (FANTOM5)") +
+  scale_fill_manual(values = c("indianred", "deepskyblue3"), guide=F) +
+  xlab("Significant interaction") +
+  theme_classic()
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/002_CRE2gene_assignment_FANTOM5_correlations.pdf", width = 2, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+```{r}
+sessionInfo()
+```
+

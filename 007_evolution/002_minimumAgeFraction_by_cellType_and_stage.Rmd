@@ -1,0 +1,221 @@
+---
+title: "Mouse Cerebellum - Minimum age fraction: summary by cell type and timepoint"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(gridExtra)
+  library(Matrix)
+  library(RColorBrewer)
+  library(SummarizedExperiment)
+})
+```
+
+Loading peak matrix
+
+```{r, eval=FALSE}
+peak_mat <- readRDS("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peak_matrix_SE_withInfo_robustPeaks.rds")
+mouse_peaks <- read.table("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt", header = T, sep = "\t", stringsAsFactors = F)
+```
+
+Estimating the fraction of peaks in each age group for each cell
+
+```{r}
+tot_dist <- Matrix::colSums(assay(peak_mat[peak_mat@elementMetadata$genomic_class_broad %in% c("Distal"),]) > 0)
+
+muridae_dist_fraction <- Matrix::colSums(assay(peak_mat[peak_mat@elementMetadata$min_age_collapsed=="0-20_muridae" & peak_mat@elementMetadata$genomic_class_broad %in% c("Distal"),]) > 0) / tot_dist
+
+eutherian_dist_fraction <- Matrix::colSums(assay(peak_mat[peak_mat@elementMetadata$min_age_collapsed=="73-105_eutherian" & peak_mat@elementMetadata$genomic_class_broad %in% c("Distal"),]) > 0) / tot_dist
+
+mammalian_dist_fraction <- Matrix::colSums(assay(peak_mat[peak_mat@elementMetadata$min_age_collapsed=="160-177_mammalian" & peak_mat@elementMetadata$genomic_class_broad %in% c("Distal"),]) > 0) / tot_dist
+
+amniote_dist_fraction <- Matrix::colSums(assay(peak_mat[peak_mat@elementMetadata$min_age_collapsed=="312-350_tetrapod" & peak_mat@elementMetadata$genomic_class_broad %in% c("Distal"),]) > 0) / tot_dist
+
+vertebrate_dist_fraction <- Matrix::colSums(assay(peak_mat[peak_mat@elementMetadata$min_age_collapsed=="435_vertebrate" & peak_mat@elementMetadata$genomic_class_broad %in% c("Distal"),]) > 0) / tot_dist
+
+age.stats <- data.frame(
+  cell=colnames(assay(peak_mat)),
+  muridae_dist_fraction,
+  eutherian_dist_fraction,
+  mammalian_dist_fraction,
+  amniote_dist_fraction,
+  vertebrate_dist_fraction,
+  stringsAsFactors = F
+)
+
+saveRDS(age.stats, "~/Mouse_Cereb/Revisions/007_conservation_backgroundDist/Mouse_Cerebellum_cellStats_minAge_stats_byCell_distOnly.rds")
+```
+
+```{r}
+age.stats <-  left_join(cell.anno, age.stats)
+
+age_lineage_stats <- filter(age.stats, !Cell_type_broad %in% c("Parabrachial+Isthmic_nuclei", "Glut_DN+Isthmic_nuclei", "Other", "MBO", "Isthmic_nuclei", "Parabrachial")) %>%
+ group_by(Cell_type_broad, Cell_type_broad_color, Timepoint, Lib) %>%
+  summarise(
+    mean_muridae=mean(muridae_dist_fraction),
+    mean_eutherian=mean(eutherian_dist_fraction),
+    mean_mammalian=mean(mammalian_dist_fraction),
+    mean_amniote=mean(amniote_dist_fraction),
+    mean_vertebrate=mean(vertebrate_dist_fraction),
+    ## Number of cells in each bin
+    count=n()) %>%
+  ungroup() %>%
+  group_by(Cell_type_broad, Cell_type_broad_color, Timepoint) %>%
+  summarise(
+    muridae_ci_low=min(mean_muridae),
+    muridae_ci_mean=mean(mean_muridae),
+    muridae_ci_up=max(mean_muridae),
+    eutherian_ci_low=min(mean_eutherian),
+    eutherian_ci_mean=mean(mean_eutherian),
+    eutherian_ci_up=max(mean_eutherian),
+    mammalian_ci_low=min(mean_mammalian),
+    mammalian_ci_mean=mean(mean_mammalian),
+    mammalian_ci_up=max(mean_mammalian),
+    amniote_ci_low=min(mean_amniote),
+    amniote_ci_mean=mean(mean_amniote),
+    amniote_ci_up=max(mean_amniote),
+    vertebrate_ci_low=min(mean_vertebrate),
+    vertebrate_ci_mean=mean(mean_vertebrate),
+    vertebrate_ci_up=max(mean_vertebrate),
+    count=sum(count)
+  )
+
+age_lineage_stats$t <- as.numeric(factor(age_lineage_stats$Timepoint))
+age_lineage_stats <- droplevels(age_lineage_stats)
+```
+
+```{r}
+p <- ggplot(filter(age_lineage_stats, count >=50), aes(x=t, y= muridae_ci_mean, color=Cell_type_broad)) +
+  geom_pointrange(aes(ymin=muridae_ci_low, ymax= muridae_ci_up)) +
+  geom_line() +
+  scale_x_continuous(breaks = seq(min(age_lineage_stats$t), max(age_lineage_stats$t), by = 1), labels=toupper(sort(unique(age_lineage_stats$Timepoint)))) +
+  scale_color_manual(values = levels(age_lineage_stats$Cell_type_broad_color)) +
+  #scale_y_continuous(breaks = seq(0.4, 0.6, by = 0.02)) +
+  theme_classic() +
+  ylab("Muridae-specific (0-20 Mya) fraction (intergenic CREs)") +
+    xlab("Developmental stage") +
+  geom_hline(yintercept = sum(peak_mat@elementMetadata$min_age_collapsed=="0-20_muridae" & peak_mat@elementMetadata$genomic_class_broad %in% c("Distal")) / sum(peak_mat@elementMetadata$genomic_class_broad %in% c("Distal")), lty="dashed", color="gray70") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid.minor.x = element_blank(), panel.grid.major.x = element_blank())
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/007_Mouse_cerebellum_CellTypesBroad_intergenic_muridae_fraction.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+```{r}
+p <- ggplot(filter(age_lineage_stats, count >=50), aes(x=t, y= eutherian_ci_mean, color=Cell_type_broad)) +
+  geom_pointrange(aes(ymin=eutherian_ci_low, ymax= eutherian_ci_up)) +
+  geom_line() +
+  scale_x_continuous(breaks = seq(min(age_lineage_stats$t), max(age_lineage_stats$t), by = 1), labels=toupper(sort(unique(age_lineage_stats$Timepoint)))) +
+  scale_color_manual(values = levels(age_lineage_stats$Cell_type_broad_color)) +
+  #scale_y_continuous(breaks = seq(0.4, 0.6, by = 0.02)) +
+  theme_classic() +
+  ylab("Eutherian-shared (73-96 Mya) fraction (intergenic CREs)") +
+    xlab("Developmental stage") +
+  geom_hline(yintercept = sum(peak_mat@elementMetadata$min_age_collapsed=="73-105_eutherian" & peak_mat@elementMetadata$genomic_class_broad %in% c("Distal")) / sum(peak_mat@elementMetadata$genomic_class_broad %in% c("Distal")), lty="dashed", color="gray70") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid.minor.x = element_blank(), panel.grid.major.x = element_blank())
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/007_Mouse_cerebellum_CellTypesBroad_intergenic_eutherian_fraction.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+```{r}
+p <- ggplot(filter(age_lineage_stats, count >=50), aes(x=t, y= mammalian_ci_mean, color=Cell_type_broad)) +
+  geom_pointrange(aes(ymin=mammalian_ci_low, ymax= mammalian_ci_up)) +
+  geom_line() +
+  scale_x_continuous(breaks = seq(min(age_lineage_stats$t), max(age_lineage_stats$t), by = 1), labels=toupper(sort(unique(age_lineage_stats$Timepoint)))) +
+  scale_color_manual(values = levels(age_lineage_stats$Cell_type_broad_color)) +
+  #scale_y_continuous(breaks = seq(0.4, 0.6, by = 0.02)) +
+  theme_classic() +
+  geom_hline(yintercept = sum(peak_mat@elementMetadata$min_age_collapsed=="160-177_mammalian" & peak_mat@elementMetadata$genomic_class_broad %in% c("Distal")) / sum(peak_mat@elementMetadata$genomic_class_broad %in% c("Distal")), lty="dashed", color="gray70") +
+  ylab("Mammalian-shared (160-177 Mya) fraction (intergenic CREs)") +
+    xlab("Developmental stage") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid.minor.x = element_blank(), panel.grid.major.x = element_blank())
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/007_Mouse_cerebellum_CellTypesBroad_intergenic_mammalian_fraction.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+```{r}
+p <- ggplot(filter(age_lineage_stats, count >=50), aes(x=t, y= amniote_ci_mean, color=Cell_type_broad)) +
+  geom_pointrange(aes(ymin=amniote_ci_low, ymax= amniote_ci_up)) +
+  geom_line() +
+  scale_x_continuous(breaks = seq(min(age_lineage_stats$t), max(age_lineage_stats$t), by = 1), labels=toupper(sort(unique(age_lineage_stats$Timepoint)))) +
+  scale_color_manual(values = levels(age_lineage_stats$Cell_type_broad_color)) +
+  #scale_y_continuous(breaks = seq(0.4, 0.6, by = 0.02)) +
+  theme_classic() +
+  ylab("Amniote-shared (312-350 Mya) fraction (intergenic CREs)") +
+  geom_hline(yintercept = sum(peak_mat@elementMetadata$min_age_collapsed=="312-350_tetrapod" & peak_mat@elementMetadata$genomic_class_broad %in% c("Distal")) / sum(peak_mat@elementMetadata$genomic_class_broad %in% c("Distal")), lty="dashed", color="gray70") +
+    xlab("Developmental stage") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid.minor.x = element_blank(), panel.grid.major.x = element_blank())
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/007_Mouse_cerebellum_CellTypesBroad_intergenic_amniote_fraction.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+```{r}
+p <- ggplot(filter(age_lineage_stats, count >=50), aes(x=t, y= vertebrate_ci_mean, color=Cell_type_broad)) +
+  geom_pointrange(aes(ymin=vertebrate_ci_low, ymax= vertebrate_ci_up)) +
+  geom_line() +
+  scale_x_continuous(breaks = seq(min(age_lineage_stats$t), max(age_lineage_stats$t), by = 1), labels=toupper(sort(unique(age_lineage_stats$Timepoint)))) +
+  scale_color_manual(values = levels(age_lineage_stats$Cell_type_broad_color)) +
+  #scale_y_continuous(breaks = seq(0.4, 0.6, by = 0.02)) +
+  theme_classic() +
+  geom_hline(yintercept = sum(peak_mat@elementMetadata$min_age_collapsed=="435_vertebrate" & peak_mat@elementMetadata$genomic_class_broad %in% c("Distal")) / sum(peak_mat@elementMetadata$genomic_class_broad %in% c("Distal")), lty="dashed", color="gray70") +
+  ylab("Vertebrate-shared (>435 Mya) fraction (intergenic CREs)") +
+    xlab("Developmental stage") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), panel.grid.minor.x = element_blank(), panel.grid.major.x = element_blank())
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/007_Mouse_cerebellum_CellTypesBroad_intergenic_vertebrate_fraction.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+```{r}
+filter(age_lineage_stats, count >=50) %>%
+  group_by(Cell_type_broad) %>%
+  summarise(r=cor.test(muridae_ci_mean, t, method = "pearson")$estimate,
+            p=cor.test(muridae_ci_mean, t, method = "pearson")$p.value) %>%
+  summarise(median(r),
+            median(p))
+
+filter(age_lineage_stats, count >=50) %>%
+  group_by(Cell_type_broad) %>%
+  summarise(r=cor.test(eutherian_ci_mean, t, method = "pearson")$estimate,
+            p=cor.test(eutherian_ci_mean, t, method = "pearson")$p.value) %>%
+  summarise(median(r),
+            median(p))
+
+filter(age_lineage_stats, count >=50) %>%
+  group_by(Cell_type_broad) %>%
+  summarise(r=cor.test(mammalian_ci_mean, t, method = "pearson")$estimate,
+            p=cor.test(mammalian_ci_mean, t, method = "pearson")$p.value) %>%
+  summarise(median(r),
+            median(p))
+
+filter(age_lineage_stats, count >=50) %>%
+  group_by(Cell_type_broad) %>%
+  summarise(r=cor.test(amniote_ci_mean, t, method = "pearson")$estimate,
+            p=cor.test(amniote_ci_mean, t, method = "pearson")$p.value) %>%
+  summarise(median(r),
+            median(p))
+
+filter(age_lineage_stats, count >=50) %>%
+  group_by(Cell_type_broad) %>%
+  summarise(r=cor.test(vertebrate_ci_mean, t, method = "pearson")$estimate,
+            p=cor.test(vertebrate_ci_mean, t, method = "pearson")$p.value) %>%
+  summarise(median(r),
+            median(p))
+```
+
+```{r}
+sessionInfo()
+```
+

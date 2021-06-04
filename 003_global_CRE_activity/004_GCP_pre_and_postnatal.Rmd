@@ -1,0 +1,113 @@
+---
+title: "Pre- and post-natal GCPs"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library("DESeq2")
+  library(Matrix)
+  library(ComplexHeatmap)
+  library("rGREAT")
+  library(RColorBrewer)
+  library(viridis)
+})
+```
+
+Loading peak matrix
+
+```{r}
+peak_mat <- readRDS("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peak_matrix_SE_withInfo_robustPeaks.rds")
+mouse_peaks <- read.table("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt", header = T, sep = "\t", stringsAsFactors = F)
+cell_anno <- readRDS("~/Mouse_Cereb/004_cellTypes_broad/Mouse_Cerebellum_atac_finalCellType_annotation.rds")
+```
+
+We will focus exclusively on pre- and post-natal GCPs; however we want to make sure that our calls are supported by replicates:
+
+Creating a pseudobulk per library
+
+```{r}
+table(cell_anno$Sample_short[cell_anno$Cell_type=="GCP_prenatal"])
+table(cell_anno$Sample_short[cell_anno$Cell_type=="GCP_postnatal"])
+
+samples <- filter(cell_anno, Cell_type %in% c("GCP_prenatal", "GCP_postnatal")) %>%
+  group_by(Cell_type, Sample) %>%
+  count() %>%
+  filter(n >= 100)
+
+atac.pseudobulk <- do.call(cbind, parallel::mclapply(1:nrow(samples), function(i) {
+  cell_i <- cell_anno$cell[cell_anno$Cell_type==samples$Cell_type[i] & cell_anno$Sample==samples$Sample[i]]
+  atac.data <- assay(peak_mat[,cell_i])
+  return(Matrix::rowSums(atac.data))
+}, mc.cores = nrow(samples)))
+
+colnames(atac.pseudobulk) <- paste(samples$Cell_type, samples$Sample, sep = "-")
+rownames(atac.pseudobulk) <- peak_mat@elementMetadata$peak
+
+saveRDS(atac.pseudobulk, "~/Mouse_Cereb/Revisions/010_markerPeaks_ArchR/Mouse_Cerebellum_GCPs_pseudobulk_byLib.rds")
+```
+
+```{r}
+atac.info <- data.frame(sample=colnames(atac.pseudobulk), stringsAsFactors = F) %>%
+  separate(sample, into = c("Cell_type", "Sample"), sep = "-",remove = F) %>%
+  group_by(Cell_type) %>%
+  mutate(rep=1:n()) %>%
+  ungroup()
+
+atac.deseq <- DESeqDataSetFromMatrix(countData = atac.pseudobulk,
+                                     colData = atac.info,
+                                     design = ~ Cell_type)
+
+atac.deseq <- DESeq(atac.deseq)
+
+res <- results(atac.deseq, contrast=c("Cell_type", "GCP_postnatal", "GCP_prenatal"), alpha = 0.05, lfcThreshold = 0.5)
+
+sum(na.omit(res$padj < 0.05))
+```
+
+```{r}
+plotMA(atac.deseq, alpha = 0.05, lfcThreshold = 0.5)
+```
+
+```{r}
+res_df <- as.data.frame(res) %>%
+  rownames_to_column("peak") %>%
+  filter(is.na(padj)==F)
+
+sum(is.na(res_df$padj))
+sum(is.na(res_df$log2FoldChange))
+
+head(res_df)
+
+peaks_up <- res_df$peak[res_df$padj < 0.05 & res_df$log2FoldChange >= 1.5]
+peaks_down <- res_df$peak[res_df$padj < 0.05 & res_df$log2FoldChange <=(-1.5)]
+
+
+res_df$class <- factor(ifelse(res_df$padj < 0.05 & abs(res_df$log2FoldChange) >= 1.5,
+                       yes = ifelse(res_df$log2FoldChange > 0, yes = "up", no = "down"),
+                       no = "no"), levels = c("no", "up", "down"))
+
+p <- ggplot(res_df, aes(x=log10(baseMean), y=log2FoldChange, color=class)) +
+  geom_point(alpha=0.3, size=0.3) +
+  scale_color_manual(values = c("gray70", "deepskyblue3", "indianred")) +
+  geom_hline(yintercept = 0, color="black", lty="dashed") +
+  theme_classic()
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/010_GCPs_MAplot.pdf", width = 6, height = 5, useDingbats = F); print(p); dev.off()
+```
+
+```{r}
+saveRDS(atac.deseq, "~/Mouse_Cereb/Revisions/010_markerPeaks_ArchR/GCP_deseq.rds")
+
+saveRDS(res_df, "~/Mouse_Cereb/Revisions/010_markerPeaks_ArchR/GCP_deseq_results.rds")
+```
+
+```{r}
+sessionInfo()
+```
+

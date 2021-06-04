@@ -1,0 +1,721 @@
+---
+title: "Mouse Cerebellum - Peak clusters in cerebellum progenitors"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(Matrix)
+  library(cluster)
+  library(viridis)
+  library(gridExtra)
+  library("rGREAT")
+  library(RColorBrewer)
+  library(ComplexHeatmap)
+  library(SummarizedExperiment)
+  library(pvclust)
+})
+```
+
+```{r}
+## CPM cutoff (in at least one subtype and stage) for peaks to be considered as active in the progenitors.
+## This value is determined based on:
+## 1. Bimodality in max cpm distribution
+## 2. Enrichment for merged dataset peak clusters associated with astroglia activity
+cpm_cutoff <- 5
+```
+
+
+##1. Preparing the input: CPM and standardising
+
+```{r}
+peak_mat <- readRDS("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peak_matrix_SE_withInfo_robustPeaks.rds")
+
+cell_anno <- readRDS("~/Mouse_Cereb/004_cellTypes_broad/Mouse_Cerebellum_atac_finalCellType_annotation.rds")
+
+cell_anno <- readRDS("~/Mouse_Cereb/004_cellTypes_broad/Mouse_Cerebellum_atac_finalCellType_annotation.rds")
+cell_anno$Cell_type_color <- as.character(cell_anno$Cell_type_color)
+cell_anno$Cell_type <- as.character(cell_anno$Cell_type)
+cell_anno$Cell_type_color[cell_anno$Cell_type=="Progenitor_VZ"] <- "#A1BBE1"
+cell_anno$Cell_type_color[cell_anno$Cell_type=="Progenitor_anteriorVZ"] <- "#795ad6"
+cell_anno$Cell_type <- factor(cell_anno$Cell_type, levels = unique(cell_anno$Cell_type))
+cell_anno$Cell_type_color <- factor(cell_anno$Cell_type_color, levels = unique(cell_anno$Cell_type_color))
+
+## Mouse peak info
+mouse_peaks <- read.table("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary_withCellTypeTau.txt", header = T, sep = "\t", stringsAsFactors = F)
+```
+
+Focusing on progenitor cells.
+
+We are excluding astroblasts and mature astrocytes and Bergmann glia, as well as brainstem progenitors which are overall very different from the cerebellar cells.
+
+```{r}
+## Determining how many cells we have for each pseudobulk
+cell_counts <- filter(cell_anno, Cell_type_broad == "Astroglia", !(Timepoint %in% c("P14", "P63"))) %>%
+  filter(grepl("astroblast|brainstem", Cell_type)==F)%>%
+  group_by(Cell_type, Timepoint) %>%
+  dplyr::count() %>%
+  mutate(sample=paste(Cell_type, Timepoint, sep = "_"))
+
+## Number of pseudobulk samples
+nrow(cell_counts)
+
+## Number of cells per pseudobulk
+hist(log10(cell_counts$n), breaks = 20)
+
+## Pseudobulks with at least 100 cells
+sum(cell_counts$n >= 100)
+
+cell_counts$sample[cell_counts$n >= 100]
+
+## Pseudobulks to do:
+cell_counts.filtered <- filter(cell_counts, n >=100)
+
+print(cell_counts.filtered$sample)
+```
+
+Now aggregating counts in each pseudobulk. We will limit ourselves to robust peaks only!
+
+```{r}
+pseudobulks <- do.call(cbind, parallel::mclapply(1:nrow(cell_counts.filtered), function(i){
+  cells <- cell_anno$cell[cell_anno$Cell_type==cell_counts.filtered$Cell_type[i] & cell_anno$Timepoint == cell_counts.filtered$Timepoint[i]]
+  pseudo <- Matrix::rowSums(assay(peak_mat[, cells]))
+  return(pseudo)
+}, mc.cores = 10))
+
+dim(pseudobulks)
+colnames(pseudobulks) <- unique(cell_counts.filtered$sample)
+row.names(pseudobulks) <- peak_mat@elementMetadata$peak
+
+write.table(pseudobulks, "~/Mouse_Cereb/014_Astroglia/Mouse_progenitors_by_timepoint_pseudobulk_raw.txt", row.names = T, col.names = T, quote = F, sep = "\t")
+
+## Calculating CPM values per sample
+pseudobulks <- t(t(pseudobulks)/colSums(pseudobulks) * 1e6)
+
+write.table(pseudobulks, "~/Mouse_Cereb/014_Astroglia/Mouse_progenitors_by_timepoint_pseudobulk_cpm.txt", row.names = T, col.names = T, quote = F, sep = "\t")
+```
+
+Selecting informative peaks
+
+```{r}
+max_cpm <- apply(pseudobulks, 1, max)
+hist(log10(max_cpm), breaks = 50)
+abline(v = log10(cpm_cutoff), col="red", lty="dashed", lwd=2)
+
+peak_sums <- rowSums(pseudobulks)
+hist(log10(peak_sums))
+
+peak_var <- apply(pseudobulks, 1, var)
+hist(log10(peak_var))
+
+
+plot(log10(peak_sums), log10(peak_var))
+plot(log10(max_cpm), log10(peak_var))
+```
+
+Let's also consider our global CRE clusters (this can help us select an optimal cutoff here).
+
+```{r}
+lin_clust <- readRDS("~/Mouse_Cereb/013_globalCREactivity//Mouse_peaks_lineage_by_t_FinalClusters.rds")
+
+sum(names(lin_clust)==names(max_cpm))
+
+lin_clust_stats <- data.frame(
+  peak=names(lin_clust),
+  lin_clust=lin_clust,
+  prog_max_cpm=max_cpm,
+  stringsAsFactors = F)
+
+ggplot(lin_clust_stats, aes(x=as.factor(lin_clust), y=log10(prog_max_cpm))) +
+  geom_boxplot() +
+  geom_hline(yintercept = log10(cpm_cutoff), color="red", lty="dashed") +
+  theme_classic() +
+  xlab("global CRE clusters")
+```
+
+Selecting peaks based on the cpm cutoff
+
+```{r}
+pseudobulks.high <- pseudobulks[max_cpm >= cpm_cutoff,]
+
+hist(pseudobulks.high[,1])
+hist(pseudobulks.high[,2])
+```
+
+Let's calculate Spearman correlations based on peak activity (our data are not normally distributed).
+
+```{r, fig.width=7, fig.height=6}
+prog_cors <- cor(pseudobulks.high, method = "spearman")
+```
+
+```{r}
+cell_anno_uniq <- dplyr::select(cell_anno, Cell_type, Cell_type_color) %>%
+  unique()
+
+cell_type <- sapply(colnames(pseudobulks.high), function(x) {
+  comp <- str_split(x, "_", simplify = T)
+  cell <- paste(comp[1:(length(comp) -1)], collapse = "_")
+})
+
+cell_type
+
+cell_type_cols <- sapply(unique(cell_type), function(x) cell_anno_uniq$Cell_type_color[cell_anno_uniq$Cell_type==x])
+names(cell_type_cols) <- unique(cell_type)
+
+timepoint <- sapply(colnames(pseudobulks.high), function(x) {
+  comp <- str_split(x, "_", simplify = T)
+  t <- comp[length(comp)]
+})
+
+timepoint_cols <- RColorBrewer::brewer.pal(11, "Spectral")
+names(timepoint_cols) <- c("e10", "e11", "e12", "e13", "e15", "e17", "P0", "P04", "P07", "P14", "P63")
+
+ha = HeatmapAnnotation(cell_type = cell_type, stage=timepoint, col=list(cell_type=cell_type_cols, stage=timepoint_cols),annotation_name_side = "left", annotation_legend_param = list(direction = "vertical"))
+```
+
+
+
+```{r, fig.height=6, fig.width=6}
+h_prog <- hclust(as.dist(1-prog_cors),method = "ward.D2")
+
+plot(h_prog)
+```
+
+Let's also run it with bootstrapping
+
+```{r, fig.height=8, fig.width=6}
+## Pvclust only allows pearson's correlation. Therefore, first we have to transform to ranks
+pseudobulks.high.rank <- do.call(cbind, list(apply(pseudobulks.high, 2, rank, ties.method="average")))
+
+dim(pseudobulks.high.rank)
+colnames(pseudobulks.high.rank) <- colnames(pseudobulks.high)
+row.names(pseudobulks.high.rank) <- row.names(pseudobulks.high)
+
+result <- pvclust(pseudobulks.high.rank, method.dist="cor", method.hclust="ward.D2", use.cor="pairwise.complete.obs", nboot=1000, parallel=TRUE)
+
+saveRDS(result, "~/Mouse_Cereb/014_Astroglia/Mouse_progenitors_by_timepoint_pvclust_spearman_wardD2.rds")
+
+plot(result)
+pvrect(result, alpha=0.95)
+result$edges
+
+print(result, digits=3)
+```
+
+
+Visualising with a complex heatmap
+
+```{r, fig.width=10, fig.height=8}
+draw(Heatmap(matrix = prog_cors,
+        cluster_rows =result$hclust,
+        cluster_columns = result$hclust,
+        row_dend_width = unit(20, "mm"),
+        column_dend_height =  unit(20, "mm"),
+        show_row_names = T,
+        border = TRUE,
+        top_annotation = ha,
+        heatmap_legend_param = list( title = "Spearman's rho")), heatmap_legend_side = "left", annotation_legend_side = "right")
+```
+
+```{r}
+pdf("~/Mouse_Cereb/Figures/006_astroglia//Mouse_Progenitors_hClust_Spearman_rho.pdf", width=10, height = 8, useDingbats = F);draw(Heatmap(matrix = prog_cors,
+        cluster_rows = result$hclust,
+        cluster_columns = result$hclust,
+        row_dend_width = unit(20, "mm"),
+        column_dend_height =  unit(20, "mm"),
+        show_row_names = T,
+        border = TRUE,
+        top_annotation = ha,
+        heatmap_legend_param = list( title = "Spearman's rho")), heatmap_legend_side = "left", annotation_legend_side = "right"); dev.off()
+```
+
+We see that early on progenitors primarily group by developmental stage (e10, e11, e12).
+From e13 on, the major grouping variable is the progenitor type (bipotent, gliogenic, RL etc).
+
+Let's proceed to identify peak clusters, as we did for the merged dataset. This will allow us to separate peaks driven by stage, as well as pinpoint subtype specific CREs.
+
+Standardising: fraction of max cpm value
+
+```{r}
+pseudobulks.std <- pseudobulks/max_cpm
+
+pseudobulks.std[1:5, 1:5]
+
+## Rounding to the third digit to ease off subsequent calculations
+pseudobulks.std <- round(pseudobulks.std, digits = 3)
+pseudobulks.std[1:5, 1:5]
+
+## We will only keep peaks that reached at least 5 cpm in at least one sample
+pseudobulks.std <- pseudobulks.std[max_cpm >=cpm_cutoff,]
+dim(pseudobulks.std)
+```
+
+
+##2. Clustering: k-means
+
+Optimising k based on a subsample of peaks
+
+```{r, eval=FALSE}
+ks <- c(5:20, 25, 30, 35)
+length(ks)
+
+clust_opt <- Reduce(bind_rows,lapply(1:10, function(s){
+  set.seed(s)
+  i <- sample(1:nrow(pseudobulks.std), 20000)
+  x <- do.call(rbind,lapply(ks, function(k){
+    cl <- kmeans(pseudobulks.std[i,], centers = k, nstart = 25, iter.max = 100)
+    wws <- cl$tot.withinss
+    ss <- silhouette(cl$cluster, as.dist(1-cor(t(pseudobulks.std[i,]))))
+    return(c(k,wws, mean(ss[,3])))
+  }))
+  x <- as.data.frame(x)
+  colnames(x) <- c("k", "wws", "sil")
+  x$seed <- s
+  return(x)
+}))
+
+write_tsv(clust_opt, "~/Mouse_Cereb/014_Astroglia/peak_kmeans_optimising_k.txt")
+```
+
+```{r}
+clust_opt <- read_tsv("~/Mouse_Cereb/014_Astroglia/peak_kmeans_optimising_k.txt")
+
+ggplot(clust_opt, aes(x=k, y=wws, color=as.factor(seed))) +
+  geom_point() +
+  geom_line() +
+  theme_classic()
+
+ggplot(clust_opt, aes(x=k, y=sil, color=as.factor(seed))) +
+  geom_point() +
+  geom_line() +
+  theme_classic()
+
+ggplot(filter(clust_opt, k%in% 5:20), aes(x=k, y=sil, color=as.factor(seed))) +
+  geom_point() +
+  geom_line() +
+  theme_classic()
+
+ggplot(filter(clust_opt, k%in% 5:20), aes(x=k, y=wws, color=as.factor(seed))) +
+  geom_point() +
+  geom_line() +
+  theme_classic()
+```
+
+We can go for 10-13 clusters. However, as before for the global CRE activity, we have seen that results improve if we first make more k-clusters, then merge them back based on hierarchical clustering.
+
+```{r, eval=FALSE}
+set.seed(1)
+prim_clust <- kmeans(pseudobulks.std, centers = 30, nstart = 50, iter.max = 200)
+
+saveRDS(prim_clust, "~/Mouse_Cereb/014_Astroglia//Mouse_peaks_progenitors_by_t_PrimaryClusters_k30_obj.rds")
+
+table(prim_clust$cluster)
+```
+
+```{r}
+prim_clust <- readRDS("~/Mouse_Cereb/014_Astroglia//Mouse_peaks_progenitors_by_t_PrimaryClusters_k30_obj.rds")
+table(prim_clust$cluster)
+sum(names(prim_clust$cluster) == row.names(pseudobulks.std))
+```
+
+##3. Clustering round 2: Refining clusters with hierarchical clustering of their centers
+
+```{r, fig.height=5, fig.width=6}
+## Visualising the clustering of the cluster centers
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 5)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 6)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 7)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 8)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 9)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 10)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 11)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 12)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 13)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 14)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 15)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 16)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 17)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 18)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 19)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = T,clustering_distance_rows = "correlation", cutree_rows = 20)
+```
+
+Let's go for 12 clusters
+
+Merging the clusters
+
+```{r, eval=FALSE}
+final_k <- 12
+
+h <- hclust(as.dist(1-cor(t(prim_clust$centers), use = "pairwise.complete.obs", method = "pearson")))
+
+clust_merge <- cutree(h, final_k)
+clust_new <- sapply(prim_clust$cluster, function(x) clust_merge[which(names(clust_merge)==x)])
+names(clust_new) <- gsub("\\.[0-9]*", "", names(clust_new))
+
+# Exporting the clustering result
+saveRDS(clust_new, "~/Mouse_Cereb/014_Astroglia/Mouse_peaks_progenitors_by_t_FinalClusters.rds")
+```
+
+```{r, fig.height=12, fig.width=8}
+clust_new <- readRDS("~/Mouse_Cereb/014_Astroglia/Mouse_peaks_progenitors_by_t_FinalClusters.rds")
+
+draw(Heatmap(matrix = pseudobulks.std,
+        row_split =clust_new ,
+        cluster_rows = F,
+        cluster_columns = T,
+        show_row_names = F,
+        clustering_distance_rows = "pearson",
+        clustering_distance_columns = "pearson",
+        clustering_method_columns = "average",
+        col=colorRampPalette(brewer.pal(n=9,name = "Blues"))(100),
+        cluster_row_slices=T,
+        border = TRUE,
+        top_annotation = ha,
+        heatmap_legend_param = list( title = "Scaled activity")), heatmap_legend_side = "left", annotation_legend_side = "right")
+```
+
+##4. Cluster membership: Correlation with centers
+
+We see that not all peaks are equally close to the cluster center. To estimate the confidence of the membership for each peak to its cluster, we can calculate correlation scores across peak profiles and the centers
+
+```{r}
+cluster_centers <- do.call(cbind,lapply(sort(unique(clust_new)), function(c) {
+  colMeans(pseudobulks.std[names(clust_new[clust_new==c]),])
+}))
+
+colnames(cluster_centers) <- sort(unique(clust_new))
+
+all_cor <- cor(t(pseudobulks.std), cluster_centers)
+```
+
+Adding the peak and cluster information and plotting the correlation distributions per cluster.
+
+```{r, fig.height=14, fig.width=14}
+all_cor_df <- as.data.frame(all_cor)
+all_cor_df$peak <- row.names(all_cor_df)
+all_cor_df$clust <- factor(as.character(clust_new), levels = as.character(1:ncol(all_cor_df)))
+
+grid.arrange(grobs=lapply(as.character(1:ncol(all_cor)), function(clust) {
+  ggplot(data = NULL, aes(x=all_cor_df$clust, y=all_cor_df[, clust], fill=all_cor_df$clust)) +
+  geom_violin()+
+  ylab(paste0("Correlation to cluster: ", clust)) +
+  xlab("Cluster") +
+  theme(legend.position = "none")
+}), ncol=4)
+```
+
+```{r}
+clust_sum <- do.call(rbind,parallel::mclapply(1:nrow(all_cor_df), function(i) {
+  clust_corr <- all_cor_df[i, colnames(all_cor_df) == all_cor_df$clust[i]]
+  return(c(peak=all_cor_df$peak[i],
+              lin_clust=all_cor_df$clust[i],
+              lin_clust_corr=clust_corr,
+              mean_all_clust_corr=mean(as.numeric(all_cor_df[i, colnames(all_cor_df) %in% unique(all_cor_df$clust)]))))
+  },mc.cores = 10))
+
+clust_sum <- as.data.frame(clust_sum, stringsAsFactors=F)
+clust_sum$lin_clust_corr <- as.numeric(clust_sum$lin_clust_corr)
+clust_sum$mean_all_clust_corr <- as.numeric(clust_sum$mean_all_clust_corr)
+
+head(clust_sum)
+
+hist(clust_sum$lin_clust_corr, breaks = 100)
+
+sum(clust_sum$lin_clust_corr >= 0.5)
+```
+
+Now we can save this summary as well
+
+```{r}
+write_tsv(clust_sum, "~/Mouse_Cereb/014_Astroglia//Mouse_peaks_progenitors_by_t_FinalClusters_withCorr.txt")
+```
+
+##5. Characterizing clusters
+
+```{r}
+clust_sum <- left_join(clust_sum, mouse_peaks)
+
+## Focusing on high confidence peaks
+clust_sum.high <- filter(clust_sum, lin_clust_corr >= 0.5 | lin_clust == 6) %>%
+  mutate(lin_clust=as.character(lin_clust))
+
+## By pleiotropy (mean activity) 
+clust_means <- do.call(rbind,lapply(unique(clust_sum.high$lin_clust), function(c) {
+  m <- Matrix::colMeans(pseudobulks.std[clust_sum.high$peak[clust_sum.high$lin_clust==c],])
+  return(c(c, as.numeric(mean(m))))
+})) %>%
+  as.data.frame(stringsAsFactors=F)
+
+
+colnames(clust_means) <- c("lin_clust", "mean_activity")
+
+clust_sum.high <- left_join(clust_sum.high, clust_means)
+
+## Ordering the data.frame. This will be important for plotting the heatmap
+clust_sum.high <- arrange(clust_sum.high, desc(mean_activity), desc(genomic_class_broad))
+clust_sum.high$lin_clust <- factor(clust_sum.high$lin_clust, levels =  unique(clust_sum.high$lin_clust))
+clust_sum$lin_clust <- factor(clust_sum$lin_clust, levels =  unique(clust_sum.high$lin_clust))
+```
+
+Selecting 50,000 random peaks to plot (for visualisation purposes). 
+
+```{r}
+set.seed(1)
+peaks2plot <- sample(clust_sum.high$peak, 25000)
+
+clust_sum.high.small <- clust_sum.high[clust_sum.high$peak %in% peaks2plot,]
+
+peaks2plot <- clust_sum.high.small$peak
+clust_sum.high.small <- as.data.frame(clust_sum.high.small)
+row.names(clust_sum.high.small) <- peaks2plot
+```
+
+
+```{r, fig.height=10, fig.width=8}
+clust_cols <- c(brewer.pal(9, "Set1"), brewer.pal(8, "Set2"), brewer.pal(12, "Set3"))[1:length(unique(clust_sum.high.small$lin_clust))]
+names(clust_cols) <- unique(as.character(clust_sum.high.small$lin_clust))
+
+draw(Heatmap(matrix = pseudobulks.std[row.names(clust_sum.high.small),],
+        row_split =clust_sum.high.small$lin_clust ,
+        cluster_rows = F,
+        cluster_columns = T,
+        show_row_names = F,
+        clustering_distance_rows = "pearson",
+        clustering_distance_columns = "pearson",
+        clustering_method_columns = "average",
+        col=colorRampPalette(brewer.pal(n=9,name = "Blues"))(100),
+        left_annotation = rowAnnotation(cluster=clust_sum.high.small$lin_clust, class=clust_sum.high.small$genomic_class_broad, col=list(cluster=clust_cols, class = c("Promoter" = "darkorchid3", "Exonic" = "deepskyblue3",  "Intronic" = "darkolivegreen3","Distal" = "darkorange2")), border=T, gap = unit(1, "mm")),
+        cluster_row_slices=F,
+        border = TRUE,
+        top_annotation = ha,
+        heatmap_legend_param = list( title = "Scaled activity")), heatmap_legend_side = "left", annotation_legend_side = "right")
+```
+
+##6. GREAT enrichment
+
+```{r}
+makeBed <- function(peaks) {
+  df <- as.data.frame(do.call(rbind, lapply(peaks, function(p) {
+    return(c(str_split(p, pattern = "_", simplify = T), p))
+  })), stringsAsFactors=F)
+  df[,2] <- as.numeric(df[,2])
+  df[,3] <- as.numeric(df[,3])
+  colnames(df) <- c("chr", "start", "end", "peak")
+  return(df)
+}
+```
+
+Sending the jobs
+
+```{r, eval=FALSE}
+bg_all <- makeBed(clust_sum.high$peak)
+
+if (dir.exists("~/Mouse_Cereb/014_Astroglia/GREAT_all")==F) {
+  dir.create("~/Mouse_Cereb/014_Astroglia/GREAT_all")
+}
+
+allPeaks_enrichments <- lapply(unique(clust_sum.high$lin_clust), function(clust) {
+  peaks <- makeBed(clust_sum.high$peak[clust_sum.high$lin_clust==clust])
+  print(paste0("Submitting job for cluster ", clust))
+  job <- submitGreatJob(makeBed(clust_sum.high$peak[clust_sum.high$lin_clust==clust]), bg = bg_all, species = "mm10", includeCuratedRegDoms = F, request_interval = 10)
+  tb <- getEnrichmentTables(job, availableOntologies(job))
+  print(paste0("Getting enrichment for cluster ", clust))
+  saveRDS(tb, paste0("~/Mouse_Cereb/014_Astroglia/GREAT_all/Mouse_Peaks_clust_", clust, "_GREAT_all.rds"))
+  print(paste0("Done with cluster ", clust))
+  return(tb)
+})
+```
+
+Reading them back in:
+
+```{r}
+great_bp <- Reduce(bind_rows,lapply(unique(clust_sum$lin_clust), function(clust) {
+  tb <- readRDS(paste0("~/Mouse_Cereb/014_Astroglia/GREAT_all/Mouse_Peaks_clust_", clust, "_GREAT_all.rds"))
+  bp <- tb[["GO Biological Process"]]
+  bp$lin_clust <- clust
+  return(bp)
+}))
+
+great_bp <- arrange(great_bp, lin_clust, Hyper_Adjp_BH)
+
+length(unique(great_bp$ID))
+```
+
+We want to keep the top results from each cluster, then collapse them to reduced categories
+
+```{r, fig.height=12, fig.width=12}
+great_bp_top <- group_by(great_bp, lin_clust) %>%
+  top_n(10, -Hyper_Adjp_BH) %>%
+  filter(Hyper_Adjp_BH < 0.01)
+
+length(unique(great_bp_top$ID))
+
+#write(unique(great_bp_top$ID), "~/Mouse_Cereb/014_Astroglia/GREAT_all/Mouse_GREAT_BP_top10_acrossClusters_redundant.txt")
+
+## Summarising in Revigo (http://revigo.irb.hr/) with the following parameters:
+## Medium list (0.7)
+## Database: Mus musculus
+## similarity: SimRel
+
+## Citation
+#Supek F, Bošnjak M, Škunca N, Šmuc T.
+#"REVIGO summarizes and visualizes long lists of Gene Ontology terms"
+#PLoS ONE 2011. doi:10.1371/journal.pone.0021800
+
+great_bp_revigo <- read_csv("~/Mouse_Cereb/014_Astroglia//GREAT_all/Mouse_GREAT_BP_top10_acrossClusters_Revigo_Medium_SimRel.csv")
+
+## Filtering BP enrichment for terms in REVIGO
+great_bp_plot <- filter(great_bp, ID %in% great_bp_revigo$term_ID[great_bp_revigo$eliminated==0])
+
+great_bp_plot_spread <- select(great_bp_plot, ID, name, Hyper_Adjp_BH, lin_clust) %>%
+  spread(key = lin_clust, value = Hyper_Adjp_BH)
+
+great_bp_plot_spread[,3:ncol(great_bp_plot_spread)] <- -log10(great_bp_plot_spread[,3:ncol(great_bp_plot_spread)])
+
+## Capping at 10
+great_bp_plot_spread[,3:ncol(great_bp_plot_spread)][great_bp_plot_spread[,3:ncol(great_bp_plot_spread)] > 10] <- 10
+
+row.names(great_bp_plot_spread) <- str_trunc(great_bp_plot_spread$name, width = 70)
+```
+
+```{r, fig.width=11, fig.height=8}
+interesting_terms <- which(great_bp_plot_spread$name %in% c("organic cation transport", "generation of neurons", "coenzyme transport", "chromosome organization", "heterochromatin assembly","retina layer formation","regulation of dendritic spine development","regulation of steroid metabolic process","positive regulation of non-canonical Wnt signaling pathway via JNK cascade","cell differentiation", "cell adhesion","cell communication", "nervous system development",  "neuron fate specification", "chromatin silencing", "gene silencing", "coenzyme transport", "long-chain fatty acid biosynthetic process", "DNA repair","translation","regulation of cell projection organization","locomotion","retina layer formation","regulation of synaptic activity", "receptor localization to synapse", "positive regulation of G1/S transition of mitotic cell cycle", "signal transduction", "regulation of neurotrophin TRK receptor signaling pathway", "regulation of timing of neuron differentiation", "regulation of steroid metabolic process", "positive regulation of endocytic recycling", "positive regulation of choline O-acetyltransferase activity", "stem cell population maintenance"))
+
+ha = rowAnnotation(foo = anno_mark(at = interesting_terms, labels = str_trunc(great_bp_plot_spread$name[interesting_terms], 65)), annotation_legend_param = list(direction = "horizontal",nrow = 1, labels_gp = gpar(fontsize = 1)))
+
+draw(Heatmap(matrix = great_bp_plot_spread[,3:ncol(great_bp_plot_spread)],
+        cluster_rows = T,
+        cluster_columns = T,
+        show_column_names = T,
+                        clustering_distance_rows = "pearson",
+        clustering_method_rows = "ward.D2", 
+        cluster_column_slices = "ward.D2",
+        show_row_names = F,
+        col=viridis(100,option = "D"),
+        border = TRUE,
+        bottom_annotation = HeatmapAnnotation(cluster=unique(clust_sum$lin_clust), col=list(cluster=clust_cols), border=T),
+        right_annotation = ha,
+        heatmap_legend_param = list( title = "-log10 adj P-val", direction="horizontal")), heatmap_legend_side = "top")
+
+```
+
+##3. HOMER enrichment
+
+Exporting all peaks as bed files:
+
+```{r}
+if(dir.exists("~/Mouse_Cereb/014_Astroglia/bed_files")==F) {
+  dir.create("~/Mouse_Cereb/014_Astroglia/bed_files")
+}
+
+lapply(unique(clust_sum$lin_clust), function(clust) {
+  peaks <- makeBed(clust_sum.high$peak[clust_sum.high$lin_clust==clust])
+
+  write.table(peaks, paste0("~/Mouse_Cereb/014_Astroglia/bed_files/Mouse_peaks_clust_", clust, "_all.bed"), col.names = F, row.names = F, sep = "\t", quote = F)
+
+})
+
+write.table(makeBed(clust_sum.high$peak), "~/Mouse_Cereb/014_Astroglia/bed_files/Mouse_peaks_background_all.bed", col.names = F, row.names = F, sep = "\t", quote = F)
+```
+
+Submiting homer jobs (through the server)
+
+```{bash, eval=FALSE}
+cd ~/Mouse_Cereb/014_Astroglia/bed_files
+
+for i in *clust*_all.bed; do
+	name="${i%.*}"
+	nice -n 5 findMotifsGenome.pl $i mm10 ../homer/"$name"_Homer/ -bg Mouse_peaks_background_all.bed -gc -size given -len 8,10,12&
+done
+
+wait
+
+echo Done!
+```
+
+Reading in the results:
+
+```{r}
+motif_path <- list.files("~/Mouse_Cereb/014_Astroglia/homer/", pattern = "Mouse_.*_Homer$")
+
+print(motif_path)
+
+motifs <- Reduce(bind_rows,lapply(motif_path, function(p) {
+  motifs <- read_tsv(paste0("~/Mouse_Cereb/014_Astroglia/homer/", p, "/knownResults.txt"))
+  motifs$lin_clust <- str_split(p, '_', simplify = T)[4]
+  return(motifs)
+}))
+
+motifs <-   mutate(motifs, `Motif Name`= gsub("\\/.*", "", `Motif Name`)) %>%
+  group_by(`Motif Name`, lin_clust) %>%
+  summarise(`Log P-value`=min(`Log P-value`)) %>%
+  ungroup()
+
+## All motifs included in the file are significant!
+
+motifs_spread <- select(motifs, `Motif Name`, `Log P-value`, lin_clust) %>%
+  spread(key = lin_clust, value=`Log P-value`)
+
+## Now also identifying the top motif per cluster. We want to label them on the heatmap
+top_motif_by_clust <- unique(apply(motifs_spread[,2:ncol(motifs_spread)], 2, function(x) motifs_spread$`Motif Name`[which.min(x)]))
+
+top_motif_by_clust
+
+## These aren't that informative
+## Let's make our custom list
+
+interesting_motifs <- c("Atoh1(bHLH)","Ronin(THAP)", "HIC1(Zf)","Smad3(MAD)","Gli2(Zf)","Snail1(Zf)","NF1(CTF)", "CTCF(Zf)", "Eomes(T-box)", "AP-2gamma(AP2)","En1(Homeobox)", "Sox2(HMG)", "Otx2(Homeobox)","RORgt(NR)",  "Klf4(Zf)",  "Oct4(POU,Homeobox)", "Esrrb(NR)",  "ETS(ETS)", "Brn1(POU,Homeobox)","Ascl1(bHLH)","STAT1(Stat)", "Ptf1a(bHLH)", "ZEB1(Zf)", "Zic(Zf)", "COUP-TFII(NR)")
+
+## Capping to 100
+motifs_spread[,2:ncol(motifs_spread)] <- motifs_spread[,2:ncol(motifs_spread)] * (-1)
+motifs_spread[,2:ncol(motifs_spread)][motifs_spread[,2:ncol(motifs_spread)] > 100] <- 100
+motifs_spread <- motifs_spread[,c("Motif Name", unique(clust_sum$lin_clust))]
+
+## Annotating with the TF family
+motif_anno <- data.frame(motif=motifs_spread$`Motif Name`, stringsAsFactors = F) %>%
+  mutate(tf_family=gsub("(", "", str_extract(motif, "\\(.*\\)"), fixed = T)) %>%
+   mutate(tf_family=gsub(")", "", tf_family, fixed = T))
+
+row.names(motif_anno) <- motif_anno$motif
+
+## Keeping only prevalent families and setting the rest to other
+top_families <- group_by(motif_anno, tf_family) %>%
+  dplyr::count() %>%
+  arrange(desc(n))
+
+top_families <- top_families$tf_family[1:10]
+
+motif_anno$tf_family[!(motif_anno$tf_family %in% top_families)] <- "Other"
+
+n <- brewer.pal(11, "Set3")
+names(n) <- unique(motif_anno$tf_family)
+```
+
+```{r, fig.width=8, fig.height=8}
+ha = rowAnnotation(foo = anno_mark(at = which(motifs_spread$`Motif Name` %in% interesting_motifs), labels = motifs_spread$`Motif Name`[which(motifs_spread$`Motif Name` %in% interesting_motifs)]), annotation_legend_param = list(direction = "horizontal",nrow = 1, labels_gp = gpar(fontsize = 0.1), padding = unit(10, "mm")))
+
+draw(Heatmap(matrix = as.matrix(motifs_spread[,2:ncol(motifs_spread)]),
+        cluster_rows = T,
+        cluster_columns = T,
+        show_column_names = T,
+        show_row_names = F,
+        clustering_distance_rows = "pearson",
+        clustering_distance_columns = "pearson",
+        col=viridis(100,option = "E"),
+        border = TRUE,
+        bottom_annotation = HeatmapAnnotation(cluster=unique(clust_sum$lin_clust), col=list(cluster=clust_cols), border=T),
+        left_annotation = rowAnnotation(tf_family=motif_anno$tf_family, col=list(tf_family=n), border=T, annotation_legend_param = list(direction = "horizontal",nrow = 1)),
+        right_annotation = ha,
+        heatmap_legend_param = list( title = "-log10 P-val", direction="horizontal")), heatmap_legend_side = "top")
+
+```
+
+```{r}
+sessionInfo()
+```
+

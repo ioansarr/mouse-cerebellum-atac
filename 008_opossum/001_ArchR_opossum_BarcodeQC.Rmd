@@ -1,0 +1,641 @@
+---
+title: "Opossum Cerebellum 001 - Barcode QC with ArchR"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ArchR)
+  library(tidyverse)
+  library(RColorBrewer)
+})
+```
+
+Initialising ArchR
+
+```{r}
+addArchRThreads(threads = 40) 
+
+## Working directory. This is where the arrow files will be generated and stored.
+setwd("~/Opo_Cereb/")
+
+## Genome and annotation
+mondom5_genomeAnno <- readRDS("~/Opo_Cereb/000_prep_annotation/002_makeArchRanno/ArcR_monDom5_splitChr_genomeAnnotation.rds")
+mondom5_geneAnno <- readRDS("~/Opo_Cereb/000_prep_annotation/002_makeArchRanno/ArcR_monDom5_splitChr_ens96andXLOCs_geneAnnotation.rds")
+```
+
+Reading in the fragment files and creating the respective arrow files
+
+```{r}
+samples <- list.files("~/sds/sd17d003/scATAC/Cerebellum/Opossum/", pattern = "^sa.*", include.dirs = T)
+
+sample.info <- data.frame(sample=samples, s_split=samples,stringsAsFactors = F) %>%
+  separate(s_split, into = c("lib", "species", "tissue", "timepoint", "sex"), sep = "_")
+
+inputFiles <- sapply(samples, function(x) paste0("~/sds/sd17d003/scATAC/Cerebellum/Opossum/",x, "/cellranger/", x, "/outs/fragments.tsv.gz"))
+
+length(samples)
+print(samples)
+```
+
+Now creating the arrow files and filtering for high quality cells.
+
+We will require high quality barcodes to have at least 5,000 fragments and a TSS enrichment of 2 (same fragments as mouse but TSS enrichment reduced as the opossum annotation is less precise).
+
+```{r}
+if (dir.exists("001_barcode_qc")==F){
+  dir.create("001_barcode_qc")
+}
+
+ArrowFiles <- createArrowFiles(
+  inputFiles = inputFiles,
+  sampleNames = names(inputFiles),
+  filterTSS = 2, 
+  filterFrags = 5000,
+  genomeAnnotation = mondom5_genomeAnno,
+  geneAnnotation = mondom5_geneAnno, 
+  addTileMat = TRUE,
+  addGeneScoreMat = TRUE,
+  QCDir = "001_barcode_qc",
+  promoterRegion = c(2000,100),
+  minFrags = 2500,
+  force = T
+)
+```
+
+```{r}
+ArrowFiles <- list.files("~/Opo_Cereb/", pattern = ".arrow")
+```
+
+```{r}
+if (dir.exists("002_doublets")==F){
+  dir.create("002_doublets")
+}
+
+doubScores <- addDoubletScores(
+  input = ArrowFiles,
+  k = 10, #Refers to how many cells near a "pseudo-doublet" to count.
+  knnMethod = "LSI", #Refers to the embedding to use for nearest neighbor search.
+  LSIMethod = 1,
+  dimsToUse = 1:50,
+  nTrials = 10,
+  scaleDims = F,
+  LSIParams = list(seed = 1,
+                   varFeatures = 50000,
+                   excludeChr = c("chrX", "chrY", "chrM")),
+  outDir = "002_doublets"
+)
+```
+
+Now we can initialize our first project:
+
+```{r}
+proj <- ArchRProject(
+  ArrowFiles = ArrowFiles,  
+  genomeAnnotation = mondom5_genomeAnno,
+  geneAnnotation = mondom5_geneAnno,
+  outputDirectory = "proj1_init",
+  copyArrows = TRUE #This is recommened so that you maintain an unaltered copy for later usage.
+)
+
+## Also adding more metadata
+proj$cellNames_short <- sapply(getCellNames(proj), function(x) {
+  paste(str_extract(x, "sa[0-9]*"), str_split(x, pattern = fixed("#"), simplify = T)[2], sep="_")
+})
+
+proj$Tissue <- sapply(proj$Sample, function(x) str_split(x, pattern = fixed("_"), simplify = T)[3])
+
+proj$Timepoint <- sapply(proj$Sample, function(x) str_split(x, pattern = fixed("_"), simplify = T)[4])
+
+proj$Lib <- sapply(proj$Sample, function(x) str_split(x, pattern = fixed("_"), simplify = T)[1])
+proj$Sex <- sapply(proj$Sample, function(x) str_split(x, pattern = fixed("_"), simplify = T)[5])
+
+proj$Sample_short <- paste(proj$Tissue, proj$Timepoint, proj$Lib, proj$Sex, sep = "_")
+```
+
+How many cells passed QC? Start keeping records for them:
+
+```{r}
+nCells(proj)
+barcodes_init <- getCellColData(proj) %>%
+  as.data.frame() %>%
+  rownames_to_column("barcode")
+```
+
+TSS ridge plot
+
+```{r}
+p <- plotGroups(
+    ArchRProj = proj, 
+    groupBy = "Sample_short", 
+    colorBy = "cellColData", 
+    name = "TSSEnrichment",
+    pal = rev(colorRampPalette(brewer.pal(11, "Spectral"))(length(unique(proj$Sample_short)))),
+    plotAs = "ridges"
+   ) +
+  ylab("Samples")
+
+p
+```
+
+Fragment size distribution
+
+```{r}
+fragment_sizes <- plotFragmentSizes(ArchRProj = proj, returnDF = T)
+
+head(fragment_sizes)
+dim(fragment_sizes)
+
+fragment_sizes <- as.data.frame(fragment_sizes) %>%
+  dplyr::rename(Sample=sampleName) %>%
+  left_join(unique(dplyr::select(as.data.frame(getCellColData(proj)), Sample, Sample_short)))
+
+p <-ggplot(fragment_sizes, aes(x=fragmentSize, y=fragmentPercent, color=as.factor(Sample_short))) +
+  geom_line() +
+  theme_classic() +
+  xlab("Fragment size") +
+  ylab("Density") +
+  theme(legend.position = "bottom")+
+  scale_color_manual(values = colorRampPalette(brewer.pal(11, "Spectral"))(length(unique(proj$Sample_short))), name="Sample")
+
+p
+```
+
+TSS enrichment
+
+```{r}
+tssEnr <- plotTSSEnrichment(ArchRProj = proj, returnDF = T)
+
+head(tssEnr)
+dim(tssEnr)
+
+tssEnr <- as.data.frame(tssEnr) %>%
+  dplyr::rename(Sample=sampleName) %>%
+  left_join(unique(dplyr::select(as.data.frame(getCellColData(proj)), Sample, Sample_short)))
+
+p <-ggplot(tssEnr, aes(x=x, y=smoothValue, color=as.factor(Sample_short))) +
+  geom_line() +
+  theme_classic() +
+  xlab("Distance from TSS (bp)") +
+  ylab("Normalised signal") +
+  theme(legend.position = "bottom")+
+  scale_color_manual(values = colorRampPalette(brewer.pal(11, "Spectral"))(length(unique(proj$Sample_short))), name="Sample")
+
+p
+```
+
+Filtering putative doublets (pass 1).
+Here we want to be relatively lenient, so we select a ratio of 1 (i.e. filtering top 5% of barcodes for a sample of 5,000 cells).
+
+We are using Doublet enrichment as a cutoff.
+
+```{r}
+proj <- filterDoublets(ArchRProj = proj,
+                       filterRatio = 1)
+```
+
+Updating these barcodes in our log file:
+
+```{r}
+nCells(proj)
+barcodes_init$Doublet_1stPass <- !(barcodes_init$barcode %in% getCellNames(proj))
+```
+
+Now we can calculate our first iterative LSI. We are now extending our dimensions to 100 and the number of variable features to 100K.
+
+```{r}
+proj <- addIterativeLSI(ArchRProj = proj,
+                        useMatrix = "TileMatrix",
+                        name = "IterativeLSI_qc",
+                        iterations=5,
+                        clusterParams = list(
+                          resolution = c(0.1, 0.2, 0.4, 0.8), 
+                          sampleCells = 20000, 
+                          n.start = 10
+                        ), 
+                        varFeatures = 100000,
+                        dimsToUse = 1:100,
+                        totalFeatures = 500000,
+                        seed = 1,
+                        LSIMethod = 1,
+                        scaleDims = FALSE,
+                        corCutOff = 0.75,
+                        excludeChr = c("chrX", "chrY", "chrM"),
+                        binarize = T,
+                        force = T)
+```
+
+Clustering: The goal here is to identify clusters enriched for doublets/ low quality cells.
+For this we should go for a relatively high resolution (3.0) for Seurat Louvain clustering.
+
+```{r}
+proj <- addClusters(input = proj,
+                    name = "Clusters_qc",
+                    reducedDims = "IterativeLSI_qc",
+                    method = "Seurat",
+                    force = T,
+                    resolution=3.0,
+                    corCutOff = 0.75,
+                    scaleDims = FALSE,
+                    maxClusters = 80,
+                    seed = 1)
+
+barcodes_init <- getCellColData(proj, select = "Clusters_qc") %>%
+  as.data.frame() %>%
+  rownames_to_column("barcode") %>%
+  right_join(barcodes_init)
+```
+
+We can also run a UMAP to allow us to visualise the distribution of putative doublets/ low quality cells.
+
+```{r}
+proj <- addUMAP(ArchRProj = proj,
+                name = "UMAP_qc",
+                reducedDims = "IterativeLSI_qc",
+                minDist = 0.2,
+                metric = "cosine",
+                nNeighbors = 25,
+                force = T,
+                seed = 1,
+                scaleDims = F,
+                corCutOff = 0.75)
+```
+
+Now we can have a look into the UMAP:
+
+```{r, fig.width=8, fig.height=8}
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Sample_short", embedding = "UMAP_qc", pal = rev(colorRampPalette(brewer.pal(11, "Spectral"))(length(unique(proj$Sample_short)))), rastr = T, labelMeans = F)
+p2 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Clusters_qc", embedding = "UMAP_qc", rastr = T)
+
+ggAlignPlots(p1, p2, type = "h")
+```
+
+```{r}
+if (dir.exists("Figures/001_QC")==F){
+  dir.create("Figures/001_QC",recursive = T)
+}
+
+pdf("Figures/001_QC/Opossum_atac_LSI_pass1_tiles_bySample.pdf", width = 8, height = 8, useDingbats = F); print(p1);dev.off()
+
+pdf("Figures/001_QC/Opossum_atac_LSI_pass1_tiles_byCluster.pdf", width = 8, height = 8, useDingbats = F); print(p2);dev.off()
+```
+
+Let's also plot some genes
+
+```{r}
+interesting_genes <- toupper(c("Atoh1", "Sox2", "Notch1","Cyp26b1","Foxp2", "Skor2", "Car8", "Cdon", "Gad2", "Sox14", "Tlx3", "Lmx1a", "Eomes", "Mgat5","Pax2", "Top2a", "Ptf1a", "Kirrel2", "Rora", "Rorb", "Slc17a6", "Meis2", "Aqp4", "Olig2", "Cbln3", "Fgf3", "Grin2b", "Neurod1", "Nhlh1", "Gdf10", "Fabp7", "Map3k1", "Gli2", "Esrrg", "Sorcs3", "Cdh22", "Etv1", "Junb", "Mef2a", "Foxp1", "Cdh9", "March11", "Pvalb", "Lhx2", "Pax5", "Zfhx3", "Zfhx4", "Fgf17", "Syndig1l","Gabra6", "Slc1a3", "Inpp5d", "Cx3cr1", "Mobp", "Sox10", "Lims2", "Slc4a1", "Angptl8", "Lmx1b", "Isl1", "Lef1"))
+
+interesting_genes <- interesting_genes[interesting_genes %in% proj@geneAnnotation$genes$symbol]
+
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = interesting_genes, 
+    embedding = "UMAP_qc",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = NULL
+)
+
+p
+```
+
+We see some differences in the P21 samples (could be developmental differences or batch effects). We'll need to use Harmony to align these samples in order to call peaks.
+
+But first, we can make sure we have removed all doublets (similar to our analysis on mouse):
+
+```{r}
+## Doublet score
+p <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "DoubletScore", embedding = "UMAP_qc", rastr = T)
+p
+
+
+## Doublet enrichment
+p <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "DoubletEnrichment", embedding = "UMAP_qc", rastr = T)
+p
+
+## nFragments
+p <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "nFrags", embedding = "UMAP_qc", rastr = T)
+p
+```
+
+```{r, fig.width=6, fig.height=6}
+hist(proj$nFrags, breaks = 100, main = "Number of fragments")
+abline(v = median(proj$nFrags), col="deepskyblue3", lty="dashed")
+
+p <- ggPoint(x=proj$nFrags,
+        y=proj$DoubletEnrichment,
+        colorDensity = T,
+        rastr = T) +
+  geom_hline(yintercept = 4, col="red", lty="dashed") +
+  geom_vline(xintercept = 45000, col="red", lty="dashed") +
+  xlab("nFragments") +
+  ylab("DoubletEnrichment")
+
+p
+
+```
+
+
+```{r, fig.width=8, fig.height=8}
+df <- getCellColData(proj) %>%
+  as.data.frame()
+
+median(df$nFrags)
+
+ggplot(df, aes(log10(nFrags))) +
+  geom_histogram(bins = 50) +
+  facet_wrap(~Sample_short) +
+  geom_vline(xintercept = log10(2.5*median(df$nFrags)), color="red")
+
+doub_cutoffs <- group_by(df, Sample) %>%
+  summarise(
+    medFrags = median(nFrags),
+    doubCutoff = 2.5 * median(nFrags)
+  )
+
+put_doublets <- proj$cellNames[sapply(1:length(proj$cellNames), function(i) proj$nFrags[i] > doub_cutoffs$doubCutoff[doub_cutoffs$Sample == proj$Sample[i]] | proj$DoubletEnrichment[i] > 4)]
+
+barcodes_init$Doublet_2ndPass <- barcodes_init$barcode %in% put_doublets
+```
+
+```{r}
+doub_enrich <- getCellColData(proj) %>%
+  as.data.frame() %>%
+  rownames_to_column("cellNames") %>%
+  group_by(Clusters_qc) %>%
+  summarise(Doub_freq=sum(cellNames %in% put_doublets)/length(cellNames)) %>%
+  arrange(desc(Doub_freq)) %>%
+  mutate(Clusters_qc=factor(Clusters_qc, levels = unique(Clusters_qc)))
+  
+p <- ggplot(doub_enrich, aes(x=Clusters_qc, y=Doub_freq)) +
+  geom_bar(stat="identity") +
+  ylab("Fraction of cells as putative doublets") +
+  geom_hline(yintercept = 0.30, color="red", lty="dashed") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle=45, hjust = 0.9))
+
+p
+
+spurious_clust <- as.character(doub_enrich$Clusters_qc[doub_enrich$Doub_freq > 0.3])
+
+spurious_cells <- proj$cellNames[proj$Clusters_qc %in% spurious_clust]
+
+length(spurious_cells[!(spurious_cells %in% put_doublets)])
+
+write(spurious_clust, "002_doublets/Mou_Cer_clustersEnriched_in_putDoublets.txt")
+write(spurious_cells, "002_doublets/Mou_Cer_cells_in_clustersEnriched_in_putDoublets.txt")
+```
+
+
+```{r}
+ggplot(filter(barcodes_init , Doublet_1stPass==F), aes(Sample, fill=Doublet_2ndPass)) +
+  geom_bar() +
+  coord_flip()
+```
+
+Let's save the project
+
+```{r}
+saveArchRProject(proj)
+```
+
+Removing doublets to create the final project
+
+```{r}
+subsetArchRProject(proj,
+                   cells = proj$cellNames[!(proj$cellNames %in% c(put_doublets, spurious_cells))],
+                   dropCells = F,
+                   outputDirectory = "proj2_finalCells")
+
+barcodes_init$PassQC_all <- barcodes_init$barcode %in% proj$cellNames
+```
+
+```{r}
+proj <- loadArchRProject("proj2_finalCells/")
+```
+
+Now we can reprocess the project (Iterative LSI, harmony, clustering and UMAP):
+
+```{r}
+proj <- addIterativeLSI(ArchRProj = proj,
+                        useMatrix = "TileMatrix",
+                        name = "IterativeLSI_finalNucSet",
+                        iterations=5,
+                        clusterParams = list(
+                          resolution = c(0.1, 0.2, 0.4, 0.8), 
+                          sampleCells = 20000, 
+                          n.start = 10
+                        ), 
+                        varFeatures = 100000,
+                        dimsToUse = 1:100,
+                        totalFeatures = 500000,
+                        seed = 1,
+                        LSIMethod = 1,
+                        scaleDims = FALSE,
+                        corCutOff = 0.75,
+                        excludeChr = c("chrX", "chrY", "chrM"),
+                        binarize = T,
+                        force = T)
+```
+
+```{r}
+proj <- addHarmony(proj,
+                   reducedDims = "IterativeLSI_finalNucSet",
+                   name ="HarmonyLSI_finalNucSet")
+```
+
+```{r}
+proj <- addClusters(input = proj,
+                    name = "Clusters_finalNucSet_res1.0",
+                    reducedDims = "HarmonyLSI_finalNucSet",
+                    method = "Seurat",
+                    force = T,
+                    resolution=1.0,
+                    corCutOff = 0.75,
+                    scaleDims = FALSE,
+                    seed = 1)
+```
+
+We can also run a UMAP:
+
+```{r}
+proj <- addUMAP(ArchRProj = proj,
+                name = "UMAP_finalNucSet",
+                reducedDims = "HarmonyLSI_finalNucSet",
+                minDist = 0.2,
+                metric = "cosine",
+                nNeighbors = 25,
+                force = T,
+                seed = 1,
+                scaleDims = F,
+                corCutOff = 0.75)
+```
+
+```{r, fig.width=8, fig.height=8}
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Sample_short", embedding = "UMAP_finalNucSet", pal = colorRampPalette(brewer.pal(11, "Spectral"))(length(unique(proj$Sample_short))), rastr = T, labelMeans = T)
+p2 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Clusters_finalNucSet_res1.0", embedding = "UMAP_finalNucSet", rastr = T)
+
+ggAlignPlots(p1, p2, type = "h")
+```
+
+```{r, fig.width=10, fig.height=8}
+p1
+```
+
+Let's check again some interesting genes:
+
+```{r}
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = interesting_genes, 
+    embedding = "UMAP_finalNucSet",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = NULL
+)
+
+p
+```
+
+```{r}
+## Doublet score
+p <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "DoubletScore", embedding = "UMAP_finalNucSet", rastr = T)
+p
+
+
+## Doublet enrichment
+p <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "DoubletEnrichment", embedding = "UMAP_finalNucSet", rastr = T)
+p
+
+## nFragments
+p <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "nFrags", embedding = "UMAP_finalNucSet", rastr = T)
+p
+```
+
+We should save the LSI, UMAP and Cluster information:
+
+```{r}
+if (dir.exists("003_finalNucSet")==F){
+  dir.create("003_finalNucSet")
+}
+
+## UMAP
+saveRDS(getEmbedding(proj, embedding = "UMAP_finalNucSet", returnDF = F), "003_finalNucSet/Opossum_Cereb_finalNucSet_UMAP_merged_tiles.rds")
+
+## LSI
+saveRDS(getReducedDims(proj, reducedDims = "IterativeLSI_finalNucSet", returnMatrix = F), "003_finalNucSet/Opossum_Cereb_finalNucSet_LSI_merged_tiles.rds")
+
+## Clusters and other cell data
+clust <- getCellColData(proj) %>%
+  as.data.frame() %>%
+  rownames_to_column("cellName")
+
+saveRDS(clust, "003_finalNucSet/Opossum_Cereb_finalNucSet_Clusters_merged_tiles_res1.0_and_barcodeStats.rds")
+```
+
+Let's save the project for now:
+
+```{r}
+saveArchRProject(proj)
+```
+
+Some QC plots:
+
+TSS ridge plot
+
+```{r}
+p <- plotGroups(
+    ArchRProj = proj, 
+    groupBy = "Sample_short", 
+    colorBy = "cellColData", 
+    name = "TSSEnrichment",
+    pal = rev(colorRampPalette(brewer.pal(11, "Spectral"))(length(unique(proj$Sample_short)))),
+    plotAs = "ridges"
+   ) +
+  ylab("Samples")
+
+p
+
+pdf("Figures/001_QC/TSSenrichment_byLib.pdf", width = 6, height = 6, useDingbats = F); print(p);dev.off()
+```
+
+Fragment size distribution
+
+```{r}
+fragment_sizes <- plotFragmentSizes(ArchRProj = proj, returnDF = T)
+
+head(fragment_sizes)
+dim(fragment_sizes)
+
+fragment_sizes <- as.data.frame(fragment_sizes) %>%
+  dplyr::rename(Sample=sampleName) %>%
+  left_join(unique(dplyr::select(as.data.frame(getCellColData(proj)), Sample, Sample_short)))
+
+p <-ggplot(fragment_sizes, aes(x=fragmentSize, y=fragmentPercent, color=as.factor(Sample_short))) +
+  geom_line() +
+  theme_classic() +
+  xlab("Fragment size") +
+  ylab("Density") +
+  theme(legend.position = "bottom")+
+  scale_color_manual(values = colorRampPalette(brewer.pal(11, "Spectral"))(length(unique(proj$Sample_short))), name="Sample")
+
+p
+
+pdf("Figures/001_QC/FragLength_distribution_byLib.pdf", width = 6, height = 6, useDingbats = F); print(p);dev.off()
+
+```
+
+TSS enrichment
+
+```{r}
+tssEnr <- plotTSSEnrichment(ArchRProj = proj, returnDF = T)
+
+head(tssEnr)
+dim(tssEnr)
+
+tssEnr <- as.data.frame(tssEnr) %>%
+  dplyr::rename(Sample=sampleName) %>%
+  left_join(unique(dplyr::select(as.data.frame(getCellColData(proj)), Sample, Sample_short)))
+
+p <-ggplot(tssEnr, aes(x=x, y=smoothValue, color=as.factor(Sample_short))) +
+  geom_line() +
+  theme_classic() +
+  xlab("Distance from TSS (bp)") +
+  ylab("Normalised signal") +
+  theme(legend.position = "bottom")+
+  scale_color_manual(values = colorRampPalette(brewer.pal(11, "Spectral"))(length(unique(proj$Sample_short))), name="Sample")
+
+p
+
+pdf("Figures/001_QC/TSS_signal_distribution_byLib.pdf", width = 6, height = 6, useDingbats = F); print(p);dev.off()
+```
+
+Now, we want to assign cell types to our clusters. For that we will need to identify marker genes.
+
+```{r}
+maj_clust <- names(which(table(proj$Clusters_finalNucSet_res1.0) >= 30))
+
+maj_clust
+
+markersGS_clusters_broad_cell_types <-getMarkerFeatures(proj,
+                  groupBy = "Clusters_finalNucSet_res1.0",
+                  useMatrix = "GeneScoreMatrix",
+                  useGroups = maj_clust,
+                  threads = 10,
+                  scaleTo = 10^4)
+
+saveRDS(markersGS_clusters_broad_cell_types, "003_finalNucSet/Opossum_Cereb_finalNucSet_Clusters_merged_tiles_res1.0_markerGenes.rds")
+```
+
+Exporting the barcode stats.
+
+```{r}
+saveRDS(barcodes_init, "001_barcode_qc/Opossum_Cerebellum_barcode_stats.rds")
+```
+
+
+```{r}
+sessionInfo()
+```

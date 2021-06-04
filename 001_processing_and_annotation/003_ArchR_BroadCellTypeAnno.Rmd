@@ -1,0 +1,521 @@
+---
+title: "Mouse Cerebellum 003 - Broad cell type annotation"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ArchR)
+  library(tidyverse)
+  library(RColorBrewer)
+  library(viridis)
+  library(ComplexHeatmap)
+})
+```
+
+Now it's time to match our clusters to cell types based on their marker genes.
+
+We have already done this several times and already have a good feeling about which cell types are marked by which genes.
+Let's focus on the most prominent marker genes:
+
+```{r}
+setwd("~/Mouse_Cereb/")
+proj <- loadArchRProject("proj2_finalCells")
+markersGS_clusters_broad_cell_types <- readRDS("003_finalNucSet/Mouse_Cereb_finalNucSet_Clusters_merged_tiles_res1.5_markerGenes.rds")
+markersGS_cellAnno <- getMarkers(markersGS_clusters_broad_cell_types, cutOff = "FDR < 0.01 & Log2FC > 1")
+```
+
+```{r, fig.width=8, fig.height=8}
+interesting_genes <- c("Atoh1", "Sox2", "Foxp2", "Cdon", "Gad2", "Sox14", "Tlx3", "Lmx1a", "Eomes", "Pax2", "Top2a", "Ptf1a", "Kirrel2", "Rora", "Rorb", "Slc17a6", "Meis2", "Aqp4", "Olig2", "Cbln3", "Fgf3", "Grin2b", "Neurod1", "Nhlh1", "Gdf10", "Fabp7", "Map3k1", "Gli2", "Esrrg", "Sorcs3", "Cdh22", "Etv1", "Junb", "Mef2a", "Foxp1", "Cdh9", "March11", "Pvalb", "Lhx2", "Pax5", "Syndig1l","Gabra6", "Slc1a3", "Inpp5d")
+
+markerGenes <- c("Hbb-y", "Hbb-bh1", "Slc4a1", "Inpp5d", "Cx3cr1", "Angptl8", "Dlc1", "Col4a2", "Atoh1", "Mdga1", "Btbd11", "Map3k1", "Gli2", "Mgat5", "Lmx1a", "Dclk3", "Etv1", "Cbln3", "Gabra6", "Pax2", "Lhx5", "Cacna2d3", "March11", "Pvalb", "Grin2b", "Reln", "Nfib", "Neurod1", "Nhlh1", "Grik2", "Shisa9", "Foxp2", "Skor2", "Dab1", "Car8", "Fgf3", "Foxp1", "Cdh9", "Sox14", "Zfhx3", "Zfhx4", "Pax5", "Grm5", "Slc17a6", "Ebf2", "Lmx1b", "Tlx3", "Isl1", "Isl2", "Lef1", "Meis2", "Lhx9",  "Nhlh2", "Neurog2", "Notch1", "Sox1", "Sox2", "Cyp26b1","Fabp7","Slc1a3", "Kirrel2", "Ptf1a", "Pax3", "Gpc5", "Rorb", "Rora", "Mobp", "Sox10", "Olig2", "Lims2", "Gdf10", "Aqp4", "Etv4", "Etv5", "Aldoc")
+
+p <- plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name = union(interesting_genes, markerGenes), 
+    embedding = "UMAP_finalNucSet",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = NULL
+)
+
+p
+```
+
+Let's start exploring and labelling the clusters.
+
+We can also consult the labels from our previous annotation:
+
+```{r}
+prev_cells <- read_tsv("~/Mouse_Cerebellum/003_process_timepoints/005_annotate_cellTypes_all/Mouse_merged_seurat_cellTypes_allAssays_summary.txt")
+
+inspect_clust <- function(clust,
+                          archrproj=proj,
+                          slot="Clusters_finalNucSet_res1.5",
+                          markers=markersGS_cellAnno,
+                          umap="UMAP_finalNucSet") {
+  ## Gettting top 20 markers, excluding LncRNAs and miRNAs with non-informative names
+  m <- markers[[clust]]$name[grepl("^Gm[0-9]|Rik$|^Mir[0-9]", markers[[clust]]$name)==F][1:20]
+  print("Top 20 markers")
+  print(m)
+  print("--------------------")
+  ## Comparing to our previous annotation - cell type
+  ## Index of cells belonging to the cluster
+  i <- which(getCellColData(archrproj, slot,drop = T)==clust)
+  print("Comparison to previous annotation")
+  print(sort(table(prev_cells$cell_type[prev_cells$cell %in% archrproj$cellNames_short[i]]), decreasing = T))
+  print("--------------------")
+  ## Timepoint distribution
+  print("Timepoint distribution")
+  print(sort(table(archrproj$Timepoint[i]), decreasing = T))
+  print("--------------------")
+  ## Plotting top genes
+  print("Plotting top marker genes")
+  p <- plotEmbedding(
+    ArchRProj = archrproj, 
+    colorBy = "GeneScoreMatrix", 
+    name =m, 
+    embedding = umap,
+    quantCut = c(0.01, 0.95),
+    imputeWeights = NULL,
+  )
+  print(p)
+  print("--------------------")
+}
+
+inspect_clust("C1")
+## Erythroid
+```
+
+```{r}
+inspect_clust("C2")
+## Microglia
+```
+
+```{r}
+inspect_clust("C3")
+## Vascular (mural/endothelia/meninges)
+```
+
+```{r}
+inspect_clust("C4")
+## Oligodendrocytes
+```
+
+```{r}
+inspect_clust("C5")
+## GC subset - but no Atoh1, Gli2 but showing lots of mitotic markers -> labelling them as apoptotic GCs
+```
+
+```{r}
+inspect_clust("C6")
+## GCP prenatal
+```
+
+```{r}
+inspect_clust("C7")
+## GCP postnatal
+```
+
+```{r}
+inspect_clust("C8")
+## Postmitotic GCs P4-P7 (migratory)
+```
+
+```{r}
+inspect_clust("C9")
+## mature GCs P4-P7
+```
+
+```{r}
+inspect_clust("C10")
+## GCPs and migrating P14
+```
+
+```{r}
+inspect_clust("C11")
+## Interneurons
+```
+
+```{r}
+inspect_clust("C12")
+## Postmitotic prenatal GCs (inner EGL)
+```
+
+```{r}
+inspect_clust("C13")
+## UBCs differentiating
+```
+
+```{r}
+inspect_clust("C14")
+## Interneurons late
+```
+
+```{r}
+inspect_clust("C15")
+## UBCs adult
+```
+
+```{r}
+inspect_clust("C16")
+## GC IGL P14
+```
+
+```{r}
+inspect_clust("C17")
+## GC IGL P63
+```
+
+```{r}
+inspect_clust("C18")
+## GC IGL P63
+```
+
+```{r}
+inspect_clust("C19")
+## e10 progenitor
+```
+
+```{r}
+inspect_clust("C20")
+## e10 progenitor
+```
+
+```{r}
+inspect_clust("C21")
+## e12 progenitor
+```
+
+```{r}
+inspect_clust("C22")
+## e11 progenitor
+```
+
+```{r}
+inspect_clust("C23")
+plotEmbedding(
+    ArchRProj = proj, 
+    colorBy = "GeneScoreMatrix", 
+    name =c("Lmx1a", "Slc17a6", "Tlx3", "Isl1", "Lmx1b"), 
+    embedding = "UMAP_finalNucSet",
+    quantCut = c(0.01, 0.95),
+    imputeWeights = NULL
+)
+# Seems like mixture of parabrachial & isthmic -> will need to recluster
+```
+
+```{r}
+inspect_clust("C24")
+## GABA DN e13-P0
+```
+
+```{r}
+inspect_clust("C25")
+## GABA DN e12
+```
+
+```{r}
+inspect_clust("C26")
+## PC e12
+```
+
+```{r}
+inspect_clust("C27")
+"Dab1" %in% markersGS_cellAnno[["C27"]]$name
+"Ebf2" %in% markersGS_cellAnno[["C27"]]$name
+"Fgf3" %in% markersGS_cellAnno[["C27"]]$name
+"Cdh9" %in% markersGS_cellAnno[["C27"]]$name
+## PC e15-e17 Ebf2
+```
+
+```{r}
+inspect_clust("C28")
+"Ebf2" %in% markersGS_cellAnno[["C28"]]$name
+"Dab1" %in% markersGS_cellAnno[["C28"]]$name
+"Fgf3" %in% markersGS_cellAnno[["C28"]]$name
+"Cdh9" %in% markersGS_cellAnno[["C28"]]$name
+## PC e15-e17 Dab1
+```
+
+```{r}
+inspect_clust("C29")
+"Ebf2" %in% markersGS_cellAnno[["C29"]]$name
+"Dab1" %in% markersGS_cellAnno[["C29"]]$name
+"Fgf3" %in% markersGS_cellAnno[["C29"]]$name
+"Cdh9" %in% markersGS_cellAnno[["C29"]]$name
+## PCs Ebf2
+```
+
+```{r}
+inspect_clust("C30")
+"Ebf2" %in% markersGS_cellAnno[["C30"]]$name
+"Dab1" %in% markersGS_cellAnno[["C30"]]$name
+"Fgf3" %in% markersGS_cellAnno[["C30"]]$name
+"Cdh9" %in% markersGS_cellAnno[["C30"]]$name
+## PCs Ebf2 Fgf3
+```
+
+```{r}
+inspect_clust("C31")
+## PC Nbs
+```
+
+```{r}
+inspect_clust("C32")
+## Mixture of PC (Skor2, Foxp2) and interneuron Nbs (Pax2, Neurod6), as well as isthmic mantle (Pax5, Pax8) -> Need to recluster
+```
+
+```{r}
+inspect_clust("C33")
+## PC Nbs
+```
+
+```{r}
+inspect_clust("C34")
+
+"Lhx9" %in% markersGS_cellAnno[["C34"]]$name
+"Lmx1b" %in% markersGS_cellAnno[["C34"]]$name
+"Tlx3" %in% markersGS_cellAnno[["C34"]]$name
+"Lmo3" %in% markersGS_cellAnno[["C34"]]$name
+"Epha4" %in% markersGS_cellAnno[["C34"]]$name
+## Glut DNs (Meis2, Slc17a6, Neurod6 but no Lhx9 [isthmic Nuclei], Lmx1b [parabrachial], TLx3[MBO])
+```
+
+```{r}
+inspect_clust("C35")
+
+"Lhx9" %in% markersGS_cellAnno[["C35"]]$name
+"Lmx1b" %in% markersGS_cellAnno[["C35"]]$name
+"Tlx3" %in% markersGS_cellAnno[["C35"]]$name
+"Lmo3" %in% markersGS_cellAnno[["C35"]]$name
+"Epha4" %in% markersGS_cellAnno[["C35"]]$name
+## Glut DN ventral and isthmic nuclei (Meis2, Slc17a6, Neurod6 and Lmo3 but also Lhx9, Evx1 [isthmic Nuclei]) -> can be resolved by subclustering!
+```
+
+```{r}
+inspect_clust("C36")
+## RL NBs: Glut DN and isthmic neuroblasts (e11)
+```
+
+```{r}
+inspect_clust("C37")
+## RL NBs: Glut DN and isthmic neuroblasts (e10)
+```
+
+```{r}
+inspect_clust("C38")
+## VZ NBs: GABA DN and MBO, parabrachial (e10)
+```
+
+```{r}
+inspect_clust("C39")
+## VZ NBs: GABA DN and MBO, parabrachial (e11)
+```
+
+```{r}
+inspect_clust("C40")
+
+"Gdf10" %in% markersGS_cellAnno[["C40"]]$name
+"Olig2" %in% markersGS_cellAnno[["C40"]]$name
+"Sox2" %in% markersGS_cellAnno[["C40"]]$name
+## Bergmann astroglia precursors (+ Etv4, Etv5 although absent from marker gene list)
+```
+
+```{r}
+inspect_clust("C41")
+
+"Gdf10" %in% markersGS_cellAnno[["C41"]]$name
+"Olig2" %in% markersGS_cellAnno[["C41"]]$name
+"Sox2" %in% markersGS_cellAnno[["C41"]]$name
+## Bergmann astroglia
+```
+
+```{r}
+inspect_clust("C42")
+## OPC
+```
+
+```{r}
+inspect_clust("C43")
+## Intermediate progenitors and interneuron neuroblasts
+```
+
+```{r}
+inspect_clust("C44")
+## Progenitors
+```
+
+```{r}
+inspect_clust("C45")
+## Progenitors e13 (Gsx1 + generating interneurons!)
+```
+
+```{r}
+inspect_clust("C46")
+## Progenitors e15
+```
+
+```{r}
+inspect_clust("C47")
+"Notch1" %in%  markersGS_cellAnno[["C47"]]$name
+"Gdf10" %in%  markersGS_cellAnno[["C47"]]$name
+## Bergmann precursors e17-P0
+```
+
+```{r}
+markerGenes <- c("Hbb-y", "Hbb-bh1", "Slc4a1", "Inpp5d", "Cx3cr1", "Angptl8", "Dlc1", "Col4a2", "Atoh1", "Mdga1", "Btbd11", "Map3k1", "Gli2", "Mgat5", "Lmx1a", "Dclk3", "Etv1", "Cbln3", "Gabra6", "Pax2", "Lhx5", "Cacna2d3", "March11", "Pvalb", "Grin2b", "Reln", "Nfib", "Neurod1", "Nhlh1", "Grik2", "Shisa9", "Foxp2", "Skor2", "Dab1", "Car8", "Fgf3", "Foxp1", "Cdh9", "Sox14", "Zfhx3", "Zfhx4", "Pax5", "Grm5", "Slc17a6", "Ebf2", "Lmx1b", "Tlx3", "Isl1", "Isl2", "Lef1", "Meis2", "Lhx9",  "Nhlh2", "Neurog2", "Notch1", "Sox1", "Sox2", "Cyp26b1","Fabp7","Slc1a3", "Kirrel2", "Ptf1a", "Pax3", "Hes4","Gpc5", "Rorb", "Rora", "Mobp", "Sox10", "Olig2", "Lims2", "Gdf10", "Aqp4", "Etv4", "Etv5", "Aldoc")
+
+length(markerGenes)
+```
+
+Making a heatmap:
+
+```{r, fig.height=8, fig.width=8}
+mark_stats <- as.matrix(assay(markersGS_clusters_broad_cell_types))
+row.names(mark_stats) <-as.character(markersGS_clusters_broad_cell_types@elementMetadata$name)
+
+top_markers <- unique(as.character(sapply(markersGS_cellAnno, function(x) as.character(x$name[1:5]))))
+
+mark_stats.plot <- mark_stats[top_markers,]
+
+## Cap to 2 /-1
+mark_stats.plot[mark_stats.plot > 2] <- 2
+mark_stats.plot[mark_stats.plot < (-1)] <- (-1)
+
+marker_labels = rowAnnotation(foo = anno_mark(
+  at = grep(paste(markerGenes, collapse="|"),row.names(mark_stats.plot)),
+  labels = row.names(mark_stats.plot)[grepl(paste(markerGenes, collapse="|"), row.names(mark_stats.plot))]),
+  annotation_legend_param = list(direction = "vertical",
+                                 nrow = 1, labels_gp = gpar(fontsize = 0.1),
+                                 padding = unit(10, "mm")))
+
+draw(Heatmap(matrix = mark_stats.plot,
+        cluster_rows = T,
+        cluster_columns = T,
+        clustering_method_columns = "ward.D2",
+        clustering_method_rows = "ward.D2",
+        show_row_names = F,
+        show_column_names = T,
+        col=viridis(100,option = "B"),
+        right_annotation = marker_labels,
+        border = TRUE,
+        heatmap_legend_param = list(direction = "vertical", title = "Z-score GS")), heatmap_legend_side = "right")
+```
+
+Cell type annotation:
+
+```{r}
+## Importing cluster - cell type annotation correspondence
+cell_type_anno <- read_tsv("~/Mouse_Cereb/004_cellTypes_broad/Mouse_Cer_arch_Clusters_finalNucSet_res1.5_C47_annotation.txt")
+
+getCellColData(proj, "Clusters_finalNucSet_res1.5")
+
+cell_type_anno.df <- getCellColData(proj, "Clusters_finalNucSet_res1.5", drop = F) %>%
+  as.data.frame() %>%
+  rownames_to_column("cellName") %>%
+  left_join(cell_type_anno)
+
+if(sum(cell_type_anno.df$cellName ==  getCellNames(proj))) {
+  proj$Cell_type_broad_C47 <- as.character(cell_type_anno.df$Cell_type_broad)
+  proj$Cell_type_C47 <- cell_type_anno.df$Cell_type
+  proj$Subclustering_group_C47 <- cell_type_anno.df$Subclustering_group
+}
+
+table(proj$Cell_type_broad_C47)
+```
+
+Let's save the project for now:
+
+```{r}
+saveArchRProject(proj)
+```
+
+Now we can make subsets of this project based on the broad cell type annotation and repeat the clustering. 
+
+For that, we will need to subset the original fragment files to save space:
+
+```{r}
+## This function will retrieve barcodes associated with specified [groups] in the [group_slot] for each sample and store them in a nested list object. The structure is: group > sample > barcodes
+getNamedGroupList <- function(groups, group_slot, archr_proj=proj) {
+  named_group_lists <- lapply(groups, function(g) {
+    group_barcodes_all_samples <- archr_proj$cellNames[as.data.frame(getCellColData(archr_proj,group_slot))[,1] == g]
+    mat <- do.call(rbind, lapply(group_barcodes_all_samples, function(x) {
+      str_split(x, "#", simplify = T)
+    }))
+    group_barcodes_by_sample <- lapply(unique(mat[,1]), function(s) {
+      mat[,2][mat[,1] == s]
+    })
+    names(group_barcodes_by_sample) <- unique(mat[,1])
+    return(group_barcodes_by_sample)    
+  })
+  names(named_group_lists) <- groups
+  return(named_group_lists)
+}
+
+## This function will go through the fragments of a single sample (condition/tissue/stage + replicate) and will extract the fragments that belong to each group.
+## We are iterating over samples rather than groups because the most computationally demanding step is reading each fragment file.
+## The object "named_group_list" needs to be constructed for a set of samples and groups with the function: getNamedGroupList().
+## We follow a nested list structure with the format group > sample > barcodes. Barcodes must be a character vector with the barcodes that belong in this group for this sample, without any prefixes (i.e. as they appear in the fragments file).
+splitFragments <- function(named_group_list, out_dir="~/Mouse_Cereb/005_reprocess_by_cellType_broad/", frag_dir="~/sds/sd17d003/scATAC/Cerebellum/Mouse/") {
+  ## First, we need to identify the samples that are relevant for these groups.
+  sample_names <- unique(unlist(sapply(named_group_list, names)))
+  lapply(sample_names, function(sample_name) {
+      ## Reading in the fragments
+      frags <- fread(paste0(frag_dir, sample_name,"/cellranger/",sample_name,"/outs/fragments.tsv.gz"), header = F, nThread = 10)
+      ## Splitting the fragments by cluster (will need to update the cluster slot for merged)
+      lapply(names(named_group_list), function(g) {
+        ## Filtering the fragments that belong to the particular cluster
+        group_frag <- filter(frags, V4 %in% named_group_list[[g]][[sample_name]])
+        ## Saving the fragments from the respective group and sample
+        if (dir.exists(paste0(out_dir, g, "/fragments/"))==F){
+         dir.create(paste0(out_dir, g, "/fragments/"), recursive = T)
+        }
+        write_tsv(group_frag, path = paste0(out_dir, g, "/fragments/", sample_name, "_fragments.tsv"), col_names = F)
+        print(paste0("Exported ", nrow(group_frag), " fragments for group ", g, " from sample ", sample_name))
+    })
+  })
+  return(NULL)
+}
+```
+
+Now we specify the groups we are interested in subsetting and their specified slot in the cellColData container of the archr project.
+
+```{r}
+n_g_list <- getNamedGroupList(groups = unique(grep("Group", proj$Subclustering_group_C47, value = T)), group_slot = "Subclustering_group_C47", archr_proj = proj)
+
+splitFragments(n_g_list)
+```
+
+Then we need to sort the fragment files:
+
+```{bash}
+for i in ~/Mouse_Cereb/005_reprocess_by_cellType_broad/*/fragments/*_fragments.tsv; do sort -V -k1,1 -k2,2n -k3,3n $i > ${i%.*}_sorted.tsv; done
+```
+
+Replacing the original files to save some space:
+
+```{bash}
+for i in ~/Mouse_Cereb/005_reprocess_by_cellType_broad/*/fragments/*_sorted*; do rename -f 's/_sorted//' $i; done
+```
+
+Gziping the files:
+
+```{bash}
+for i in ~/Mouse_Cereb/005_reprocess_by_cellType_broad/*/fragments/*_fragments.tsv; do bgzip $i; done
+```
+
+Finally, indexing the files with tabix:
+
+```{bash}
+for i in ~/Mouse_Cereb/005_reprocess_by_cellType_broad/*/fragments/*_fragments.tsv.gz; do tabix -s 1 -b 2 -e 3 $i; done
+```
+
+Now we are ready to reprocess each subset with ArchR (next sections).
+
+```{r}
+sessionInfo()
+```
+

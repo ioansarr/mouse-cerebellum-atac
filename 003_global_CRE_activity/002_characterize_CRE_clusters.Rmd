@@ -1,0 +1,406 @@
+---
+title: "Mouse Cerebellum - Characterizing global CRE clusters"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(Matrix)
+  library(viridis)
+  library("rGREAT")
+  library(gridExtra)
+  library(RColorBrewer)
+  library(ComplexHeatmap)
+})
+```
+
+
+```{r}
+## Clustering results
+clust_sum <-read_tsv("~/Mouse_Cereb/013_globalCREactivity/Mouse_peaks_lineage_by_t_FinalClusters_withCorr.txt")
+clust_sum <- as.data.frame(clust_sum, stringsAsFactors=F)
+
+clust_sum$lin_clust <- factor(clust_sum$lin_clust)
+
+## Mouse peak info
+mouse_peaks <- read.table("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary_withCellTypeTau.txt", header = T, sep = "\t", stringsAsFactors = F)
+
+## Merging the two dataframes
+clust_sum <- left_join(clust_sum, mouse_peaks)
+
+lin_clust <- clust_sum$lin_clust
+names(lin_clust) <- clust_sum$peak
+
+## Standardises (x/max) CPM values
+pseudobulks.std <- read.table("~/Mouse_Cereb/013_globalCREactivity/Mouse_lineage_by_timepoint_pseudobulk_cpm_std.txt", header=T, sep="\t", stringsAsFactors=F)
+```
+
+Arranging the sample order in the pseudobulk (based on temporal emergence of cell types)
+
+```{r}
+pseudobulks.std <- pseudobulks.std[, c(colnames(pseudobulks.std)[grepl("Astroglia",colnames(pseudobulks.std))],
+                                       colnames(pseudobulks.std)[grepl("Parabrachial",colnames(pseudobulks.std))],
+                                       colnames(pseudobulks.std)[grepl("GABA_DN",colnames(pseudobulks.std))],
+                                       colnames(pseudobulks.std)[grepl("Isthmic_nuclei",colnames(pseudobulks.std))],
+                                       colnames(pseudobulks.std)[grepl("Glut_DN",colnames(pseudobulks.std))],
+                                       colnames(pseudobulks.std)[grepl("MBO",colnames(pseudobulks.std))],
+                                       colnames(pseudobulks.std)[grepl("PC",colnames(pseudobulks.std))],
+                                       colnames(pseudobulks.std)[grepl("Interneuron",colnames(pseudobulks.std))],
+                                       colnames(pseudobulks.std)[grepl("GC",colnames(pseudobulks.std))],
+                                       colnames(pseudobulks.std)[grepl("UBC",colnames(pseudobulks.std))],
+                                       colnames(pseudobulks.std)[grepl("Oligodendrocyte",colnames(pseudobulks.std))],
+                                       colnames(pseudobulks.std)[grepl("Microglia",colnames(pseudobulks.std))])]
+```
+
+Now we can try to characterise these peaks further.
+
+##1. Heatmap of CRE activity 
+
+Ordering heatmap by pleiotropy, early to late, and genomic class
+
+```{r}
+## Focusing on high confidence peaks
+clust_sum.high <- filter(clust_sum, lin_clust_corr >= 0.5 | lin_clust == 12) %>%
+  mutate(lin_clust=as.character(lin_clust))
+
+## By pleiotropy (mean activity) and cell type (based on maximum activity)
+clust_means <- do.call(rbind,lapply(unique(clust_sum.high$lin_clust), function(c) {
+  m <- Matrix::colMeans(pseudobulks.std[clust_sum.high$peak[clust_sum.high$lin_clust==c],])
+  return(c(c, as.numeric(which.max(m)), as.numeric(mean(m))))
+})) %>%
+  as.data.frame(stringsAsFactors=F)
+
+
+colnames(clust_means) <- c("lin_clust", "whichmax_activity", "mean_activity")
+
+clust_means$whichmax_activity <- as.numeric(clust_means$whichmax_activity)
+clust_means$mean_activity <- round(as.numeric(clust_means$mean_activity), digits = 1)
+clust_means$mean_activity[clust_means$mean_activity < 0.3] <- 0.1
+```
+
+
+```{r}
+clust_sum.high <- left_join(clust_sum.high, clust_means)
+
+## Ordering the data.frame. This will be important for plotting the heatmap
+clust_sum.high <- arrange(clust_sum.high, desc(mean_activity), whichmax_activity, desc(genomic_class_broad))
+clust_sum.high$lin_clust <- factor(clust_sum.high$lin_clust, levels =  unique(clust_sum.high$lin_clust))
+clust_sum$lin_clust <- factor(clust_sum$lin_clust, levels =  unique(clust_sum.high$lin_clust))
+#clust_sum$lin_clust <- factor(clust_sum$lin_clust, levels =  unique(clust_sum$lin_clust))
+#clust_sum$lin_clust_color <- factor(clust_sum$lin_clust_color, levels =  unique(clust_sum$lin_clust_color))
+```
+
+Selecting 50,000 random peaks to plot (for visualisation purposes). 
+
+```{r}
+set.seed(1)
+peaks2plot <- sample(clust_sum.high$peak, 50000)
+
+clust_sum.high.small <- clust_sum.high[clust_sum.high$peak %in% peaks2plot,]
+
+peaks2plot <- clust_sum.high.small$peak
+row.names(clust_sum.high.small) <- peaks2plot
+```
+
+```{r}
+cell_anno <- readRDS("~/Mouse_Cereb/004_cellTypes_broad/Mouse_Cerebellum_atac_finalCellType_annotation.rds")
+cell_anno <- dplyr::select(cell_anno, Cell_type_broad, Cell_type_broad_color) %>%
+  unique()
+
+cell_type <- sapply(colnames(pseudobulks.std), function(x) {
+  comp <- str_split(x, "_", simplify = T)
+  cell <- paste(comp[1:(length(comp) -1)], collapse = "_")
+})
+
+cell_type
+
+cell_type_cols <- sapply(unique(cell_type), function(x) cell_anno$Cell_type_broad_color[cell_anno$Cell_type_broad==x])
+names(cell_type_cols) <- unique(cell_type)
+
+timepoint <- sapply(colnames(pseudobulks.std), function(x) {
+  comp <- str_split(x, "_", simplify = T)
+  t <- comp[length(comp)]
+})
+
+timepoint_cols <- RColorBrewer::brewer.pal(11, "Spectral")
+names(timepoint_cols) <- unique(timepoint)
+
+ha = HeatmapAnnotation(cell_type = cell_type, stage=timepoint, col=list(cell_type=cell_type_cols, stage=timepoint_cols),annotation_name_side = "left", annotation_legend_param = list(direction = "horizontal",nrow = 1))
+```
+
+Now making the heatmap. 
+
+```{r, fig.height=12, fig.width=10}
+clust_cols <- c(brewer.pal(9, "Set1"), brewer.pal(8, "Set2"), brewer.pal(12, "Set3"))[1:length(unique(clust_sum.high.small$lin_clust))]
+
+names(clust_cols) <- unique(as.character(clust_sum.high.small$lin_clust))
+
+draw(Heatmap(matrix = pseudobulks.std[row.names(clust_sum.high.small),],
+        row_split =clust_sum.high.small$lin_clust ,
+        cluster_rows = F,
+        cluster_columns = F,
+        show_row_names = F,
+        col=colorRampPalette(brewer.pal(n=9,name = "Blues"))(100),
+        cluster_row_slices=F,
+        border = TRUE,
+        left_annotation = rowAnnotation(cluster=clust_sum.high.small$lin_clust, class=clust_sum.high.small$genomic_class_broad, col=list(cluster=clust_cols, class = c("Promoter" = "darkorchid3", "Exonic" = "deepskyblue3",  "Intronic" = "darkolivegreen3","Distal" = "darkorange2")), border=T, gap = unit(1, "mm")),
+        top_annotation = ha,
+        heatmap_legend_param = list( title = "Scaled activity")), heatmap_legend_side = "left", annotation_legend_side = "top")
+```
+
+Cluster stats
+
+```{r}
+p <- ggplot(clust_sum.high, aes(lin_clust, fill=genomic_class_broad)) +
+  geom_bar(position = "fill") +
+  scale_fill_manual(values = c("Promoter" = "darkorchid3", "Exonic" = "deepskyblue3",  "Intronic" = "darkolivegreen3","Distal" = "darkorange2"), name="Genomic\nclass") +
+  theme_classic() +
+  ylab("Fraction") +
+  xlab("Peak cluster") +
+  theme(axis.text.x = element_text(angle=60, hjust = 1.1, vjust = 1.05))
+
+p
+
+pdf("~/Mouse_Cereb/Figures/005_globalCREactivity/Mouse_peak_cluster_LineageByTimepoint_cor0.5_genomicClassBroad.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+
+
+p <- ggplot(filter(clust_sum.high, genomic_class_broad %in% c("Distal", "Intronic")), aes(lin_clust, fill=ctcf_motif)) +
+  geom_bar(position = "fill") +
+  theme_classic() +
+  scale_fill_manual(values = c("khaki", "steelblue4"), name="CTCF\nin distal\npeak") +
+  ylab("Fraction") +
+  xlab("Peak cluster") +
+  theme(axis.text.x = element_text(angle=60, hjust = 1.1, vjust = 1.05))
+
+p
+
+pdf("~/Mouse_Cereb/Figures/005_globalCREactivity/Mouse_peak_cluster_LineageByTimepoint_cor0.5_CTCF.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+##2. GREAT enrichment
+
+```{r}
+makeBed <- function(peaks) {
+  df <- as.data.frame(do.call(rbind, lapply(peaks, function(p) {
+    return(c(str_split(p, pattern = "_", simplify = T), p))
+  })), stringsAsFactors=F)
+  df[,2] <- as.numeric(df[,2])
+  df[,3] <- as.numeric(df[,3])
+  colnames(df) <- c("chr", "start", "end", "peak")
+  return(df)
+}
+```
+
+Sending the jobs
+
+```{r, eval=FALSE}
+bg_all <- makeBed(clust_sum.high$peak)
+
+if (dir.exists("~/Mouse_Cereb/013_globalCREactivity/GREAT_all")==F) {
+  dir.create("~/Mouse_Cereb/013_globalCREactivity/GREAT_all")
+}
+
+allPeaks_enrichments <- lapply(unique(clust_sum.high$lin_clust), function(clust) {
+  peaks <- makeBed(clust_sum.high$peak[clust_sum.high$lin_clust==clust])
+  print(paste0("Submitting job for cluster ", clust))
+  job <- submitGreatJob(makeBed(clust_sum.high$peak[clust_sum.high$lin_clust==clust]), bg = bg_all, species = "mm10", includeCuratedRegDoms = F, request_interval = 10)
+  tb <- getEnrichmentTables(job, availableOntologies(job))
+  print(paste0("Getting enrichment for cluster ", clust))
+  saveRDS(tb, paste0("~/Mouse_Cereb/013_globalCREactivity/GREAT_all/Mouse_Peaks_clust_", clust, "_GREAT_all.rds"))
+  print(paste0("Done with cluster ", clust))
+  return(tb)
+})
+```
+
+Reading them back in:
+
+```{r}
+great_bp <- Reduce(bind_rows,lapply(unique(clust_sum$lin_clust), function(clust) {
+  tb <- readRDS(paste0("~/Mouse_Cereb/013_globalCREactivity/GREAT_all/Mouse_Peaks_clust_", clust, "_GREAT_all.rds"))
+  bp <- tb[["GO Biological Process"]]
+  bp$lin_clust <- clust
+  return(bp)
+}))
+
+great_bp <- arrange(great_bp, lin_clust, Hyper_Adjp_BH)
+
+length(unique(great_bp$ID))
+```
+
+We want to keep the top results from each cluster, then collapse them to reduced categories
+
+```{r, fig.height=12, fig.width=12}
+great_bp_top <- group_by(great_bp, lin_clust) %>%
+  top_n(10, -Hyper_Adjp_BH) %>%
+  filter(Hyper_Adjp_BH < 0.01)
+
+length(unique(great_bp_top$ID))
+
+#write(unique(great_bp_top$ID), "~/Mouse_Cereb/013_globalCREactivity/GREAT_all/Mouse_GREAT_BP_top10_acrossClusters_redundant.txt")
+
+## Summarising in Revigo (http://revigo.irb.hr/) with the following parameters:
+## Medium list (0.7)
+## Database: Mus musculus
+## similarity: SimRel
+
+## Citation
+#Supek F, Bošnjak M, Škunca N, Šmuc T.
+#"REVIGO summarizes and visualizes long lists of Gene Ontology terms"
+#PLoS ONE 2011. doi:10.1371/journal.pone.0021800
+
+great_bp_revigo <- read_csv("~/Mouse_Cereb/013_globalCREactivity/GREAT_all/Mouse_GREAT_BP_top10_acrossClusters_Revigo_Medium_SimRel.csv")
+
+## Filtering BP enrichment for terms in REVIGO
+great_bp_plot <- filter(great_bp, ID %in% great_bp_revigo$term_ID[great_bp_revigo$eliminated==0])
+
+great_bp_plot_spread <- select(great_bp_plot, ID, name, Hyper_Adjp_BH, lin_clust) %>%
+  spread(key = lin_clust, value = Hyper_Adjp_BH)
+
+great_bp_plot_spread[,3:ncol(great_bp_plot_spread)] <- -log10(great_bp_plot_spread[,3:ncol(great_bp_plot_spread)])
+
+## Capping at 30
+great_bp_plot_spread[,3:ncol(great_bp_plot_spread)][great_bp_plot_spread[,3:ncol(great_bp_plot_spread)] > 30] <- 30
+
+row.names(great_bp_plot_spread) <- str_trunc(great_bp_plot_spread$name, width = 60)
+```
+
+```{r, fig.width=11, fig.height=8}
+interesting_terms <- which(great_bp_plot_spread$name %in% c("axonogenesis", "regulation of neurotransmitter levels", "RNA processing" , "regulation of cell proliferation", "exocytosis" ,"tissue development","learning or memory" , "neuron recognition", "transmission of nerve impulse" , "pons maturation", "pattern specification process", "cytoskeleton organization", "immune system process",  "locomotory behavior", "cerebellum structural organization", "lipid biosynthetic process", "myelination", "regulation of cholesterol homeostasis", "synaptic vesicle cycle", "cranial nerve formation", "regulation of stem cell differentiation", "cell−cell adhesion via plasma−membrane adhesion molecules","protein folding", "RNA processing", "positive regulation of synaptic transmission, glutamatergic", "regulation of cholesterol homeostasis", "somatic motor neuron differentiation", "neuron development", "contact inhibition", "oligodendrocyte cell fate specification", "vocalization behavior", "small molecule metabolic process","stem cell differentiation", "cell-cell adhesion via plasma-membrane adhesion molecules", "lung ciliated cell differentiation", "transepithelial ammonium transport", "fat-soluble vitamin metabolic process"))
+
+ha = rowAnnotation(foo = anno_mark(at = interesting_terms, labels = great_bp_plot_spread$name[interesting_terms]), annotation_legend_param = list(direction = "horizontal",nrow = 1, labels_gp = gpar(fontsize = 1)))
+
+draw(Heatmap(matrix = great_bp_plot_spread[,3:ncol(great_bp_plot_spread)],
+        cluster_rows = T,
+        cluster_columns = T,
+        show_column_names = T,
+                clustering_distance_rows = "pearson",
+        clustering_distance_columns = "pearson",
+        show_row_names = F,
+        col=viridis(100,option = "D"),
+        border = TRUE,
+        bottom_annotation = HeatmapAnnotation(cluster=unique(clust_sum$lin_clust), col=list(cluster=clust_cols), border=T),
+        right_annotation = ha,
+        heatmap_legend_param = list( title = "-log10 adj P-val", direction="horizontal")), heatmap_legend_side = "top")
+
+```
+
+##3. HOMER enrichment
+
+Exporting all peaks as bed files:
+
+```{r, eval=FALSE}
+if(dir.exists("~/Mouse_Cereb/013_globalCREactivity/bed_files")==F) {
+  dir.create("~/Mouse_Cereb/013_globalCREactivity/bed_files")
+}
+
+lapply(unique(clust_sum$lin_clust), function(clust) {
+  peaks <- makeBed(clust_sum.high$peak[clust_sum.high$lin_clust==clust])
+
+  write.table(peaks, paste0("~/Mouse_Cereb/013_globalCREactivity/bed_files/Mouse_peaks_clust_", clust, "_all.bed"), col.names = F, row.names = F, sep = "\t", quote = F)
+
+})
+
+write.table(makeBed(clust_sum.high$peak), "~/Mouse_Cereb/013_globalCREactivity/bed_files/Mouse_peaks_background_all.bed", col.names = F, row.names = F, sep = "\t", quote = F)
+```
+
+Submiting homer jobs (through the server)
+
+```{bash, eval=FALSE}
+cd ~/Mouse_Cereb/013_globalCREactivity/bed_files
+
+for i in *clust*_all.bed; do
+	name="${i%.*}"
+	nice -n 5 findMotifsGenome.pl $i mm10 ../homer/"$name"_Homer/ -bg Mouse_peaks_background_all.b
+ed -gc -size given -len 8,10,12&
+done
+
+wait
+
+echo Done!
+```
+
+Reading in the results:
+
+```{r}
+motif_path <- list.files("~/Mouse_Cereb/013_globalCREactivity/homer/", pattern = "Mouse_.*_Homer$")
+
+print(motif_path)
+
+motifs <- Reduce(bind_rows,lapply(motif_path, function(p) {
+  motifs <- read_tsv(paste0("~/Mouse_Cereb/013_globalCREactivity/homer/", p, "/knownResults.txt"))
+  motifs$lin_clust <- str_split(p, '_', simplify = T)[4]
+  return(motifs)
+}))
+
+motifs <-   mutate(motifs, `Motif Name`= gsub("\\/.*", "", `Motif Name`)) %>%
+  group_by(`Motif Name`, lin_clust) %>%
+  summarise(`Log P-value`=min(`Log P-value`)) %>%
+  ungroup()
+
+## All motifs included in the file are significant!
+
+motifs_spread <- select(motifs, `Motif Name`, `Log P-value`, lin_clust) %>%
+  spread(key = lin_clust, value=`Log P-value`)
+
+## Now also identifying the top motif per cluster. We want to label them on the heatmap
+top_motif_by_clust <- unique(apply(motifs_spread[,2:ncol(motifs_spread)], 2, function(x) motifs_spread$`Motif Name`[which.min(x)]))
+
+top_motif_by_clust
+
+## These aren't that informative
+## Let's make our custom list
+
+interesting_motifs <- c("Atoh1(bHLH)", "NF1(CTF)", "CTCF(Zf)", "Eomes(T-box)", "AP-2gamma(AP2)","En1(Homeobox)", "Sox2(HMG)", "PU.1(ETS)", "Dlx3(Homeobox)", "ZEB1(Zf)", "EBF2(EBF)", "RORgt(NR)", "Olig2(bHLH)", "Mef2b(MADS)", "JunB(bZIP)", "Klf4(Zf)",  "OCT4(POU,Homeobox)", "TEAD2(TEA)", "Esrrb(NR)", "RFX(HTH)", "ETS(ETS)", "Cux2(Homeobox)","Tcf12(bHLH)")
+
+## Capping to 200
+motifs_spread[,2:ncol(motifs_spread)] <- motifs_spread[,2:ncol(motifs_spread)] * (-1)
+motifs_spread[,2:ncol(motifs_spread)][motifs_spread[,2:ncol(motifs_spread)] > 200] <- 200
+motifs_spread <- motifs_spread[,c("Motif Name", levels(clust_sum$lin_clust))]
+
+## Annotating with the TF family
+motif_anno <- data.frame(motif=motifs_spread$`Motif Name`, stringsAsFactors = F) %>%
+  mutate(tf_family=gsub("(", "", str_extract(motif, "\\(.*\\)"), fixed = T)) %>%
+   mutate(tf_family=gsub(")", "", tf_family, fixed = T))
+
+row.names(motif_anno) <- motif_anno$motif
+
+## Keeping only prevalent families and setting the rest to other
+top_families <- group_by(motif_anno, tf_family) %>%
+  dplyr::count() %>%
+  arrange(desc(n))
+
+top_families <- top_families$tf_family[1:10]
+
+motif_anno$tf_family[!(motif_anno$tf_family %in% top_families)] <- "Other"
+
+n <- brewer.pal(11, "Set3")
+names(n) <- unique(motif_anno$tf_family)
+```
+
+```{r, fig.width=8, fig.height=8}
+ha = rowAnnotation(foo = anno_mark(at = which(motifs_spread$`Motif Name` %in% interesting_motifs), labels = motifs_spread$`Motif Name`[which(motifs_spread$`Motif Name` %in% interesting_motifs)]), annotation_legend_param = list(direction = "horizontal",nrow = 1, labels_gp = gpar(fontsize = 0.1), padding = unit(10, "mm")))
+
+draw(Heatmap(matrix = as.matrix(motifs_spread[,2:ncol(motifs_spread)]),
+        cluster_rows = T,
+        cluster_columns = T,
+        show_column_names = T,
+        show_row_names = F,
+        clustering_distance_rows = "pearson",
+        clustering_distance_columns = "pearson",
+        col=viridis(100,option = "E"),
+        border = TRUE,
+        bottom_annotation = HeatmapAnnotation(cluster=unique(clust_sum$lin_clust), col=list(cluster=clust_cols), border=T),
+        left_annotation = rowAnnotation(tf_family=motif_anno$tf_family, col=list(tf_family=n), border=T, annotation_legend_param = list(direction = "horizontal",nrow = 1)),
+        right_annotation = ha,
+        heatmap_legend_param = list( title = "-log10 P-val", direction="horizontal")), heatmap_legend_side = "top")
+
+```
+
+```{r}
+sessionInfo()
+```
+

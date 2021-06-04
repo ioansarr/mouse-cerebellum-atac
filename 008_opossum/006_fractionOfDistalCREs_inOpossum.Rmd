@@ -1,0 +1,226 @@
+---
+title: "Mouse: fraction of CREs in opossum CREs"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(RColorBrewer)
+  library(SummarizedExperiment)
+})
+```
+
+```{r}
+mouse_peaks <- read_tsv("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt")
+mouse_peaks <- filter(mouse_peaks, robust==T)
+opo_peaks <- read_tsv("~/Opo_Cereb/004_peaks/Opossum_Cerebellum_reproducible_peaks_summary.txt")
+
+ortho_cre <- read_tsv("~/Opo_Cereb/004_peaks/Opossum-Mouse.reciprocal.bestMatch.txt")
+
+ortho_cre <- filter(ortho_cre,
+                         Mouse %in% mouse_peaks$peak[mouse_peaks$robust==T & mouse_peaks$genomic_class_broad %in% c("Distal")])
+
+sort(table(opo_peaks$genomic_class[opo_peaks$peak %in% ortho_cre$Opossum]), decreasing = T)[1:10]
+
+mouse_peaks$inOpossum <- mouse_peaks$peak %in% ortho_cre$Mouse
+
+table(mouse_peaks$inOpossum)
+table(mouse_peaks$inOpossum[mouse_peaks$robust==T & mouse_peaks$genomic_class_broad %in% c("Distal")])
+```
+
+```{r}
+peak_mat <- readRDS("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peak_matrix_SE_withInfo_robustPeaks.rds")
+
+atac.data <- assay(peak_mat)
+row.names(atac.data) <- peak_mat@elementMetadata$peak
+
+fragsInDist <- Matrix::colSums(atac.data[mouse_peaks$peak[mouse_peaks$genomic_class_broad %in% c("Distal")],] > 0 )
+
+fragsInDist.Opossum <- Matrix::colSums(atac.data[mouse_peaks$peak[mouse_peaks$genomic_class_broad %in% c("Distal") & mouse_peaks$inOpossum],] > 0)
+
+Opossum.fraction <- fragsInDist.Opossum/fragsInDist
+```
+
+```{r}
+fraction.df <- data.frame(cell=colnames(atac.data),
+                          fragsInDist,
+                          Opossum.fraction, stringsAsFactors = F)
+
+cell.anno <- readRDS("~/Mouse_Cereb/004_cellTypes_broad/Mouse_Cerebellum_atac_finalCellType_annotation.rds")
+
+cell.stats <- left_join(fraction.df, cell.anno)
+```
+
+Adult cell types:
+
+```{r, fig.width=3, fig.height=4}
+cell.stats.P63 <- filter(cell.stats, Timepoint == "P63", Cell_type_broad %in% c("Astroglia", "GC", "Interneuron", "Microglia", "Oligodendrocyte")) %>%
+  droplevels() %>%
+  mutate(Cell_type_broad=factor(Cell_type_broad, levels = c("Astroglia","GC", "Oligodendrocyte",  "Interneuron", "Microglia")),
+         Cell_type_broad_color=factor(Cell_type_broad_color, levels = c("#BB4D90", "#62943c", "#A692E8","#d3405a", "#44be8d")))
+
+p <- ggplot(cell.stats.P63, aes(x=Cell_type_broad, y=Opossum.fraction, fill=Cell_type_broad)) +
+  geom_boxplot(notch = T) +
+  ylab("Fraction of intergenic CREs with conserved activity") +
+  xlab("") +
+  scale_fill_manual(values = levels(cell.stats.P63$Cell_type_broad_color), guide=F) +
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.9, vjust = 0.95))
+  
+p 
+
+pdf("~/Mouse_Cereb/Revisions/Figures/009_Mouse_P63_distalCREs_inOpossumCREs.pdf", width = 3, height = 4, useDingbats = F); print(p); dev.off()
+
+wilcox.test(cell.stats.P63$Opossum.fraction[cell.stats.P63$Cell_type_broad=="Astroglia"],
+            cell.stats.P63$Opossum.fraction[cell.stats.P63$Cell_type_broad=="Oligodendrocyte"])
+
+wilcox.test(cell.stats.P63$Opossum.fraction[cell.stats.P63$Cell_type_broad=="Interneuron"],
+            cell.stats.P63$Opossum.fraction[cell.stats.P63$Cell_type_broad=="Microglia"])
+```
+
+Differences in development:
+
+```{r, fig.width=6, fig.height=4}
+cell.stats.postn <- filter(cell.stats, Timepoint %in% c("P04","P63"), Cell_type_broad %in% c("Astroglia", "GC", "Interneuron", "Oligodendrocyte")) %>%
+  droplevels()
+
+table(cell.stats.postn$Cell_type_broad, cell.stats.postn$Timepoint)
+
+p <- ggplot(cell.stats.postn, aes(x=Timepoint, y=Opossum.fraction, fill=Cell_type_broad, alpha=Timepoint)) +
+  geom_boxplot(notch = T) +
+  facet_wrap(~Cell_type_broad, nrow=1) +
+  ylab("Fraction of intergenic CREs with conserved activity") +
+  scale_fill_manual(values = levels(cell.stats.postn$Cell_type_broad_color), guide=F) +
+  scale_alpha_manual(values = c(0.2, 1), guide=F) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.9, vjust = 0.95))
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/009_Mouse_byTime_distalCREs_inOpossumCREs.pdf", width = 5, height = 4, useDingbats = F); print(p); dev.off()
+
+wilcox.test(cell.stats.postn$Opossum.fraction[cell.stats.postn$Cell_type_broad=="GC" & cell.stats.postn$Timepoint=="P04"],
+            cell.stats.postn$Opossum.fraction[cell.stats.postn$Cell_type_broad=="GC"& cell.stats.postn$Timepoint=="P63"])
+
+wilcox.test(cell.stats.postn$Opossum.fraction[cell.stats.postn$Cell_type_broad=="Astroglia" & cell.stats.postn$Timepoint=="P04"],
+            cell.stats.postn$Opossum.fraction[cell.stats.postn$Cell_type_broad=="Astroglia"& cell.stats.postn$Timepoint=="P63"])
+```
+
+```{r, fig.width=2.5, fig.height=4}
+cell.stats.gcs_p4 <- filter(cell.stats, Cell_type %in% c("GCP_postnatal", "GC_diff_P4P7", "GC_mature_P4P7"), Timepoint=="P04") %>%
+  mutate(Cell_type=gsub("_postnatal", "", Cell_type)) %>%
+  mutate(Cell_type=gsub("_P4P7", "", Cell_type)) %>%
+  mutate(Cell_type=factor(Cell_type, levels = c("GCP", "GC_diff", "GC_mature")))
+
+p <- ggplot(cell.stats.gcs_p4, aes(x=Cell_type, y=Opossum.fraction, fill=Cell_type)) +
+  geom_boxplot(notch = T) +
+  ylab("Fraction of intergenic CREs with conserved activity") +
+  xlab("") +
+  scale_fill_manual(values = c("#b8c955", "#62943c", "#346c51"), guide=F) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.9, vjust = 0.95))
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/009_Mouse_GCsP4_distalCREs_inOpossumCREs.pdf", width = 2.5, height = 4, useDingbats = F); print(p); dev.off()
+
+wilcox.test(cell.stats.gcs_p4$Opossum.fraction[cell.stats.gcs_p4$Cell_type=="GCP"],
+            cell.stats.gcs_p4$Opossum.fraction[cell.stats.gcs_p4$Cell_type=="GC_diff"])
+
+wilcox.test(cell.stats.gcs_p4$Opossum.fraction[cell.stats.gcs_p4$Cell_type=="GC_diff"],
+            cell.stats.gcs_p4$Opossum.fraction[cell.stats.gcs_p4$Cell_type=="GC_mature"])
+```
+
+Also estimating fraction of distal CREs in opossum CREs active in the same cell type:
+
+```{r}
+opo_pseudo <- read.table("~/Opo_Cereb/004_peaks/Opossum_lineage_by_timepoint_pseudobulk_cpm_robust.txt", header = T, sep = "\t", stringsAsFactors = F)
+
+## Identifying samples in opossum
+opo_samples <- colnames(opo_pseudo)
+opo_samples
+
+## Converting to mouse names
+mou_samples <- gsub("adult", "P63", opo_samples)
+mou_samples <- gsub("P21", "P04", mou_samples)
+```
+
+```{r}
+mou_pseudo <- read.table("~/Mouse_Cereb/013_globalCREactivity/Mouse_lineage_by_timepoint_pseudobulk_cpm.txt", header = T, sep = "\t", stringsAsFactors = F)
+## Subsetting mouse pseudobulks to samples common with opossum
+mou_pseudo <- mou_pseudo[, mou_samples]
+
+mou_pseudo_inter <- mou_pseudo[row.names(mou_pseudo)  %in% mouse_peaks$peak[mouse_peaks$genomic_class=="Distal"],]
+```
+
+Iterating over mouse samples, asking what fraction of distal CREs per cell are active in the corresponding cell type and stage in opossum.
+
+To be fair across cell types and stages, we will consider the 40,000 most accessible CREs per group:
+
+```{r, fig.width=4, fig.height=4}
+N_all <- 4e4
+
+cons_stats_inter_perCell <- Reduce(bind_rows,lapply(1:length(mou_samples), function(i) {
+  mou_cell_type <- str_split(mou_samples[i], "_", simplify = T)[1]
+  mou_stage <- str_split(mou_samples[i], "_", simplify = T)[2]
+  mou_cells <- cell.anno$cell[cell.anno$Cell_type_broad==mou_cell_type & cell.anno$Timepoint==mou_stage]
+  
+  opo_c  <- sort(opo_pseudo[,i], decreasing = T)[N_all]
+  opo_peaks <- row.names(opo_pseudo)[opo_pseudo[,i] >= opo_c]
+  
+  mou_peaks <- mouse_peaks$peak[mouse_peaks$genomic_class=="Distal"]
+  
+  mou_cons <- ortho_cre$Mouse[ortho_cre$Opossum %in% opo_peaks]
+  
+  fragsInDist <- Matrix::colSums(atac.data[mou_peaks,mou_cells] > 0)
+
+  fragsInDist.Opossum <- Matrix::colSums(atac.data[intersect(mou_peaks, mou_cons),mou_cells] > 0)
+  
+  df <- data.frame(cell=mou_cells,
+                   fragsInDist,
+                   fragsInDist.Opossum,
+                   stringsAsFactors = F)
+  
+  return(df)
+})) 
+
+
+cons_stats_inter_perCell <- left_join(cons_stats_inter_perCell, cell.anno)
+
+cons_stats_inter_perCell$Opossum.fraction <- cons_stats_inter_perCell$fragsInDist.Opossum/cons_stats_inter_perCell$fragsInDist
+
+
+cons_stats_inter_perCell.P63 <- filter(cons_stats_inter_perCell, Timepoint == "P63", Cell_type_broad %in% c("Astroglia", "GC", "Interneuron", "Microglia", "Oligodendrocyte")) %>%
+  droplevels() %>%
+  mutate(Cell_type_broad=factor(Cell_type_broad, levels = c("Astroglia","GC", "Oligodendrocyte",  "Interneuron", "Microglia")),
+         Cell_type_broad_color=factor(Cell_type_broad_color, levels = c("#BB4D90", "#62943c", "#A692E8","#d3405a", "#44be8d")))
+
+p <- ggplot(cons_stats_inter_perCell.P63, aes(x=Cell_type_broad, y=Opossum.fraction, fill=Cell_type_broad)) +
+  geom_boxplot(notch = T) +
+  ylab("Fraction of intergenic CREs with conserved specificity") +
+  xlab("") +
+  scale_fill_manual(values = levels(cons_stats_inter_perCell.P63$Cell_type_broad_color), guide=F) +
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.9, vjust = 0.95))
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/009_Mouse_P63_distalCREs_conservedSpecificityInOpossumCREs.pdf", width = 3, height = 4, useDingbats = F); print(p); dev.off()
+
+wilcox.test(cons_stats_inter_perCell.P63$Opossum.fraction[cons_stats_inter_perCell.P63$Cell_type_broad=="Astroglia"],
+            cons_stats_inter_perCell.P63$Opossum.fraction[cons_stats_inter_perCell.P63$Cell_type_broad=="GC"])
+
+wilcox.test(cons_stats_inter_perCell.P63$Opossum.fraction[cons_stats_inter_perCell.P63$Cell_type_broad=="Astroglia"],
+            cons_stats_inter_perCell.P63$Opossum.fraction[cons_stats_inter_perCell.P63$Cell_type_broad=="Oligodendrocyte"])
+
+wilcox.test(cons_stats_inter_perCell.P63$Opossum.fraction[cons_stats_inter_perCell.P63$Cell_type_broad=="Interneuron"],
+            cons_stats_inter_perCell.P63$Opossum.fraction[cons_stats_inter_perCell.P63$Cell_type_broad=="Microglia"])
+```
+
+```{r}
+sessionInfo()
+```
+

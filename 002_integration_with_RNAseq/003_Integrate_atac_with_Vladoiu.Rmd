@@ -1,0 +1,224 @@
+---
+output: html_document
+params:
+  atac:
+    value: x
+title: "Integrate with Vladoiu: `r params$sample`"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+author: "Ioannis Sarropoulos"
+---
+
+````{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(Matrix)
+  library(Seurat)
+  library(gridExtra)
+})
+```
+
+```{r}
+atac <- params$atac
+```
+
+## Load atac-seurat and gene symbols
+
+```{r}
+gene.symbols <- read.table("/home/ioansarr/Data/scATAC_pipeline_v3/resources/mouse_coding_ens94_gene_symbols.txt", header = T, sep = "\t", stringsAsFactors = F)
+
+interesting_genes <- c("Pax2", "Atoh1", "Fabp7", "Sox2", "Cdon", "Top2a", "Sox14", "Foxp2", "Gad1", "Gad2", "Skor1", "Skor2", "Slc17a6", "Meis2", "Lmx1a", "Eomes", "Kirrel2", "Ptf1a", "Neurod6", "Nhlh1", "Olig2", "Fgf3", "Aqp4", "Tlx3")
+
+atac.seurat <- readRDS(paste0("~/Mouse_Cereb/010_byStage/atac_seurat/Mouse_Cerebellum_",atac,"_atac_seurat.rds"))
+
+Vladoiu_matches <- read_tsv("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_sample_match_with_atac.txt")
+
+vladoiu <- Vladoiu_matches$vladoiu[Vladoiu_matches$atac==atac]
+
+rna.seurat <- readRDS(paste0("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_rna_seurat/Vladoiu_", vladoiu, "_rna_seurat.rds"))
+```
+
+Scaling the RNA data (atac data are already scaled to 1e4)
+
+```{r}
+rna.depths <- rna.seurat$nCount_RNA
+rna.seurat[["RNAScaled"]] <- CreateAssayObject(data = t(t(rna.seurat@assays$RNA@counts)/rna.depths) * 1e4)
+```
+
+Plotting some genes
+
+```{r}
+plotMarkers <- function(gene, obj=rna.seurat, red="umap", assay="RNAScaled", log=T) {
+  if(gene.symbols$ensembl[gene.symbols$symbol==gene] %in% row.names(obj@assays[[assay]]@data)) {
+    if(log==T) {
+            ggplot(NULL, aes(x=obj@reductions[[red]]@cell.embeddings[,1],
+                 y=obj@reductions[[red]]@cell.embeddings[,2],
+                 col=log10(obj@assays[[assay]]@data[gene.symbols$ensembl[gene.symbols$symbol==gene],]))) +
+            geom_point(size=0.1) +
+            scale_colour_viridis_c(na.value = "gray90", option = "magma", direction = 1, name="log10 CPM") +
+            xlab("UMAP1") +
+            ylab("UMAP2") +
+            ggtitle(paste0(assay, "_",gene))+
+            theme_classic()
+    } else {
+            ggplot(NULL, aes(x=obj@reductions[[red]]@cell.embeddings[,1],
+                 y=obj@reductions[[red]]@cell.embeddings[,2],
+                 col=obj@assays[[assay]]@data[gene.symbols$ensembl[gene.symbols$symbol==gene],])) +
+            geom_point(size=0.1) +
+            scale_colour_viridis_c(na.value = "gray90", option = "magma", direction = 1, name="CPM") +
+            xlab("UMAP1") +
+            ylab("UMAP2") +
+            ggtitle(paste0(assay, "_",gene))+
+            theme_classic()      
+    }
+  }
+  else {
+    return(NULL)
+  }
+
+}
+```
+
+RNA
+
+```{r}
+lapply(interesting_genes, plotMarkers)
+```
+
+ATAC (gene activity)
+
+```{r}
+lapply(interesting_genes, function(g) plotMarkers(g, obj = atac.seurat, red = "umap", assay = "GeneScoreScaled"))
+```
+
+We will be using all variable features from the RNA seurat that are present in the ATAC matrix for the intersection:
+
+```{r}
+common.DE <- intersect(VariableFeatures(rna.seurat), row.names(atac.seurat@assays$GeneScoreScaled@data))
+
+length(common.DE)
+```
+
+Now we can create the anchored dataset (using the GeneScoreScaled and RNAScaled features):
+
+```{r}
+set.seed(1)
+
+anchors <- FindTransferAnchors(reference = rna.seurat, query = atac.seurat, query.assay = "GeneScoreScaled", reduction = "cca", features = common.DE, reference.assay = "RNAScaled")
+
+```
+
+Transferring cell types
+
+```{r, fig.height=4, fig.width=10}
+if (sum(is.na(rna.seurat$Vladoiu_cell_type)) < length(rna.seurat$Vladoiu_cell_type)) {
+  cell_type_predictions <- TransferData(anchorset = anchors, refdata = rna.seurat$Vladoiu_cell_type, weight.reduction=atac.seurat[["lsi"]], k.weight = 10)
+  
+  hist(cell_type_predictions$prediction.score.max, breaks = 50)
+  
+  atac.seurat@meta.data$Vladoiu_cell_type <- cell_type_predictions$predicted.id
+  atac.seurat@meta.data$Vladoiu_cell_type_predScore <- cell_type_predictions$prediction.score.max
+  
+  cowplot::plot_grid(DimPlot(atac.seurat, group.by = 'Vladoiu_cell_type', reduction = "umap", label = T)+ theme(legend.position = "none"), DimPlot(rna.seurat, group.by = 'Vladoiu_cell_type', label = T)+ theme(legend.position = "none"))
+}
+```
+
+Transferring merged clusters
+
+```{r, fig.height=4, fig.width=10}
+if (sum(is.na(rna.seurat$Vladoiu_cluster)) < length(rna.seurat$Vladoiu_cluster)) {
+  Vladoiu_cluster_predictions <- TransferData(anchorset = anchors, refdata = factor(rna.seurat$Vladoiu_cluster), weight.reduction=atac.seurat[["lsi"]], k.weight = 10)
+  
+  hist(Vladoiu_cluster_predictions$prediction.score.max, breaks = 50)
+  
+  atac.seurat@meta.data$rna_Vladoiu_cluster <- factor(Vladoiu_cluster_predictions$predicted.id, levels = levels(rna.seurat$Vladoiu_cluster))
+  
+  cowplot::plot_grid(DimPlot(atac.seurat, group.by = 'rna_Vladoiu_cluster', reduction = "umap", label = T)+ theme(legend.position = "none"), DimPlot(rna.seurat, group.by = 'Vladoiu_cluster', label = T)+ theme(legend.position = "none"))
+}
+```
+
+Also imputting RNA-seq data
+
+```{r}
+rna.refdata <- GetAssayData(rna.seurat, assay = "RNAScaled", slot = "data")
+
+imputation <- TransferData(anchorset = anchors, refdata = rna.refdata, weight.reduction=atac.seurat[["lsi"]], k.weight = 15)
+
+dim(imputation)
+
+## A problem with the imputed data is that they are smoother than the raw data. This creates a lot of artificially small non-zero values, which would otherwise be zero
+
+imputation@data <- round(imputation@data, digits = 1)
+
+atac.seurat[["VladoiuRNAScaled"]] <- CreateAssayObject(data = imputation@data)
+
+lapply(interesting_genes, function(x) plotMarkers(x, atac.seurat, assay ="VladoiuRNAScaled", red = "umap"))
+```
+
+Comparing expression of a gene with promoter accessibility and imputed expression from atac data.
+
+```{r, fig.height=4, fig.width=12}
+lapply(interesting_genes[interesting_genes %in% gene.symbols$symbol[gene.symbols$ensembl %in% row.names(rna.seurat@assays$RNAScaled@data)]], function(x) {
+  grid.arrange(
+    plotMarkers(x, rna.seurat),
+    plotMarkers(x, atac.seurat, red = "umap", assay = "GeneScoreScaled"),
+    plotMarkers(x, atac.seurat, red = "umap", assay = "VladoiuRNAScaled"), 
+    nrow=1
+  )
+})
+```
+
+We can also correlate the two matrices.
+
+We will use correlations for the highly variable genes from the RNA-seq dataset that are also present in the ATAC-seq dataset.
+
+```{r}
+length(common.DE)
+
+## We will make pseudobulks across each cluster in atac, then estimate the average activity of each gene for each assay across the pseudobulks and correlate them
+gs.pseudobulks <- do.call(cbind, parallel::mclapply(names(which(table(atac.seurat@meta.data[,paste0("Clusters_within_", atac)])>50)), function(x){
+  cells <- row.names(atac.seurat@meta.data)[atac.seurat@meta.data[,paste0("Clusters_within_", atac)]==x]
+  pseudo <- Matrix::rowMeans(atac.seurat@assays$GeneScoreScaled[common.DE, cells])
+  return(pseudo)
+}, mc.cores = 5))
+
+vlad.pseudobulks <- do.call(cbind, parallel::mclapply(names(which(table(atac.seurat@meta.data[,paste0("Clusters_within_", atac)])>50)), function(x){
+  cells <- row.names(atac.seurat@meta.data)[atac.seurat@meta.data[,paste0("Clusters_within_", atac)]==x]
+  pseudo <- Matrix::rowMeans(atac.seurat@assays$VladoiuRNAScaled[common.DE, cells])
+  return(pseudo)
+}, mc.cores = 5))
+
+common.DE.cor <- diag(cor(t(gs.pseudobulks), t(vlad.pseudobulks)))
+
+hist(common.DE.cor, breaks = 50)
+
+summary(common.DE.cor)
+
+## Let's save the correlations into a dataframe
+common.DE.cor.df <- data.frame(ensembl=names(common.DE.cor), GS_impRNA_corr=common.DE.cor, stringsAsFactors = F) %>%
+  left_join(gene.symbols) %>%
+  arrange(desc(GS_impRNA_corr))
+
+head(common.DE.cor.df)
+```
+
+Exporting the objects
+
+```{r}
+saveRDS(anchors, paste0("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_integration/Mouse_ATAC_", atac,"_with_Vladoiu_", vladoiu, "_anchors.rds"))
+
+saveRDS(atac.seurat, paste0("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_integration/Mouse_ATAC_", atac,"_Transferred_with_Vladoiu_", vladoiu, "_atac_seurat.rds"))
+
+atac.sum <- as.data.frame(atac.seurat@meta.data) %>%
+  rownames_to_column("cell")
+
+write_tsv(atac.sum, paste0("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_integration/Mouse_ATAC_", atac,"_Transferred_with_Vladoiu_", vladoiu, "_atac_seurat_summary.txt"))
+
+write_tsv(common.DE.cor.df, paste0("~/Mouse_Cereb/011_integrate_RNAseq/Vladoiu_2019/Vladoiu_integration/Mouse_ATAC_", atac,"_Transferred_with_Vladoiu_", vladoiu, "_GeneScore_vs_imputedRNA_correlations_acrossClust.txt"))
+
+```
+
+```{r}
+sessionInfo()
+```
+

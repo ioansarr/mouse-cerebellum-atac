@@ -1,0 +1,127 @@
+---
+title: "Opossum annotation"
+output:
+  html_document:
+    df_print: paged
+---
+
+We need to split the opossum genome and annotation for the first two chromosomes which are larger than 536.8 Mb.
+
+```{r, libs}
+suppressPackageStartupMessages({
+  library(Biostrings)
+  library(data.table)
+  library(dplyr)
+  library(tidyr)
+  library(stringr)
+})
+```
+
+We should start from the Ensembl gtf file, so that we make sure not to split any genes. Then we can also split the fasta file:
+
+```{r}
+opo.gtf <- fread("~/Data/Genomes/opossum_cellranger/Monodelphis_domestica.monDom5.96.gtf", header = F, sep = "\t")
+
+## Adding chromosome prefix
+opo.gtf$V1 <- paste0("chr", opo.gtf$V1)
+
+## Changing name for mt
+opo.gtf$V1[opo.gtf$V1=="chrMT"] <- "chrM"
+
+## Adding gene names where missing
+new.column <- sapply(opo.gtf$V9, function(x) ifelse(grepl("gene_name", x), yes = x, no = paste0(x, ' gene_name \"', str_extract(x, "ENSMODG[0-9]*"), '\";')))
+as.character(new.column[1])
+opo.gtf$V9 <- new.column
+
+
+max(opo.gtf$V5[opo.gtf$V5 < 536 * 1e6 & opo.gtf$V1=="chr1"])
+min(opo.gtf$V4[opo.gtf$V4 > max(opo.gtf$V5[opo.gtf$V5 < 536 * 1e6 & opo.gtf$V1=="chr1"]) & opo.gtf$V1=="chr1"])
+
+## Let's see if we can do the same for chr2
+
+max(opo.gtf$V5[opo.gtf$V5 < 536 * 1e6 & opo.gtf$V1=="chr2"])
+min(opo.gtf$V4[opo.gtf$V4 > max(opo.gtf$V5[opo.gtf$V5 < 536 * 1e6 & opo.gtf$V1=="chr2"]) & opo.gtf$V1=="chr2"])
+
+## Checking whether we split any genes:
+sum(opo.gtf$V5 > 536 * 1e6 & opo.gtf$V4 < 536 * 1e6)
+opo.gtf[opo.gtf$V5 > 536 * 1e6 & opo.gtf$V4 < 536 * 1e6,]
+
+## What happens if we use this as a new cutoff? -> 536140010 + ~1000 -> 536141000
+sum(opo.gtf$V5 > 536141000 & opo.gtf$V4 < 536141000)
+opo.gtf[opo.gtf$V5 > 536141000 & opo.gtf$V4 < 536141000,]
+
+## This way we end up with no splitting!
+
+max(opo.gtf$V5[opo.gtf$V5 < 536141000 & opo.gtf$V1=="chr1"])
+min(opo.gtf$V4[opo.gtf$V4 > max(opo.gtf$V5[opo.gtf$V5 < 536141000 & opo.gtf$V1=="chr1"]) & opo.gtf$V1=="chr1"])
+
+max(opo.gtf$V5[opo.gtf$V5 < 536141000 & opo.gtf$V1=="chr2"])
+min(opo.gtf$V4[opo.gtf$V4 > max(opo.gtf$V5[opo.gtf$V5 < 536141000 & opo.gtf$V1=="chr2"]) & opo.gtf$V1=="chr2"])
+
+## This is a relatively big gap. We can then split at 536141000 bp
+```
+
+Splitting the gtf (only chromosomes 1 and 2 have entries above 536Mb, so we can easily make the conversion without conditioning on the chromosomes).
+
+```{r}
+i <- which(opo.gtf$V5 > 536141000)
+length(i)
+
+opo.gtf$V1[i] <- paste0(opo.gtf$V1[i], "b")
+opo.gtf$V4[i] <- opo.gtf$V4[i] - 536141000
+opo.gtf$V5[i] <- opo.gtf$V5[i] - 536141000
+
+## Checks
+table(opo.gtf$V1)
+sum(opo.gtf$V4 > 536141000)
+sum(opo.gtf$V5 > 536141000)
+sum(opo.gtf$V4 < 0)
+sum(opo.gtf$V5 < 0)
+opo.gtf[opo.gtf$V4 < 0,]
+```
+
+Exporting the Ensembl gtf file
+
+```{r, eval=FALSE}
+options(scipen=999)
+write.table(opo.gtf, "~/Data/Genomes/opossum_cellranger/monDom.ensembl_splitChr.gtf", row.names = F, col.names = F, sep = "\t", quote = F)
+```
+
+Now we can read in the Fasta file and subset there as well:
+
+```{r}
+opo.fa <- readDNAStringSet("~/Data/Genomes/monDom5.fa", format = "fasta")
+
+opo.fa
+
+## Let's keep a backup
+opo.fa.old <- opo.fa
+
+length(opo.fa$chr1)
+opo.fa$chr1b <- opo.fa$chr1[536141001:length(opo.fa$chr1)]
+opo.fa$chr2b <- opo.fa$chr2[536141001:length(opo.fa$chr2)]
+opo.fa$chr1 <- opo.fa.old$chr1[1:536141000]
+opo.fa$chr2 <- opo.fa.old$chr2[1:536141000]
+
+opo.fa
+
+## Rearranging the chromosome names
+opo.fa.sort <- opo.fa[base::order(names(opo.fa))]
+
+opo.fa.sort
+```
+
+```{r}
+names(opo.fa.sort)
+```
+
+Looks good. Now let's export this as well
+
+```{r, eval=FALSE}
+writeXStringSet(opo.fa.sort, filepath = "~/Data/Genomes/opossum_cellranger/monDom_splitChr.fa", format = "fasta")
+```
+
+```{r}
+sessionInfo()
+```
+

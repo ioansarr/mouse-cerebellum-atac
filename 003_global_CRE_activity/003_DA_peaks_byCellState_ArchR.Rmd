@@ -1,0 +1,167 @@
+---
+title: "Mouse Cerebellum - Differentially accessible CREs for cell types/stats"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ArchR)
+  library(tidyverse)
+  library(RColorBrewer)
+  library(viridis)
+  library(ComplexHeatmap)
+})
+```
+
+```{r}
+proj <- loadArchRProject("~/Mouse_Cereb/proj5_final/")
+
+cell_anno <- readRDS("~/Mouse_Cereb/004_cellTypes_broad/Mouse_Cerebellum_atac_finalCellType_annotation.rds")
+
+peak.info <- read.table("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt", header = T, sep = "\t", stringsAsFactors = F)
+```
+
+Updating cell type annotations and identifying differentially accessible CREs in ArchR:
+
+```{r}
+proj$Cell_type[proj$Cell_type=="Progenitor_bipotent" & proj$Timepoint %in% c("e10", "e11", "e12")] <- "Progenitor_anteriorVZ"
+proj$Cell_type[proj$Cell_type=="GC_mature" & proj$Timepoint=="P14"] <- "GC_mature_P14"
+proj$Cell_type[proj$Cell_type=="GC_mature" & proj$Timepoint=="P63"] <- "GC_mature_P63"
+
+markersPeaks_cell_types <-getMarkerFeatures(proj,
+                  groupBy = "Cell_type",
+                  useMatrix = "PeakMatrix", 
+                  threads = 30,
+                  scaleTo = 10^4)
+
+markersPeaks_cell_types_se <- getMarkers(markersPeaks_cell_types, cutOff = "FDR < 0.01 & Log2FC > 3")
+```
+
+Collecting all markers from all cell types and states
+
+```{r}
+length(markersPeaks_cell_types_se)
+
+markerPeaks <- Reduce(bind_rows,lapply(1:length(markersPeaks_cell_types_se), function(i) {
+  ## Cell type or state
+  ct <- names(markersPeaks_cell_types_se)[i]
+  ## Object of marker peaks
+  gr <- markersPeaks_cell_types_se[[i]]
+  if (nrow(gr) == 0) {
+    return(NULL)
+  } else {
+     ## Getting peak names and stats
+    peaks <- data.frame(chr=as.character(gr$seqnames), 
+                        start=gr$start,
+                        end=gr$end,
+                        Log2FC=gr$Log2FC,
+                        FDR=gr$FDR,
+                        MeanDiff=gr$MeanDiff,
+                        Cell_type=ct,
+                        stringsAsFactors = F) %>%
+      mutate(peak=paste(chr, start, end, sep = "_"))
+    return(peaks)
+  }
+})) %>%
+  mutate(score=Log2FC * (-log10(FDR)))
+
+## Robust peaks only
+markerPeaks.robust <- filter(markerPeaks, peak %in% peak.info$peak[peak.info$robust==T])
+
+## For how many cell types and states are our peak markers?
+markerPeaks.robust.counts <- group_by(markerPeaks.robust, peak) %>%
+  dplyr::count()
+
+summary(markerPeaks.robust.counts$n)
+sum(markerPeaks.robust.counts$n == 1)
+
+## Only keeping those unique to one cell type/state
+markerPeaks.robust.unique <- filter(markerPeaks.robust, peak %in% markerPeaks.robust.counts$peak[markerPeaks.robust.counts$n==1])
+
+sort(table(peak.info$genomic_class[peak.info$peak %in% markerPeaks.robust.unique$peak]), decreasing = T)
+
+sort(table(markerPeaks.robust.unique$Cell_type), decreasing = T)
+```
+
+Now making a heatmap with the top 50 peaks per cell type (based on score=Log2FC * -log10 FDR)
+
+```{r, fig.width=4, fig.height=6}
+mark_stats <- as.matrix(assay(markersPeaks_cell_types))
+row.names(mark_stats) <- paste(as.character(markersPeaks_cell_types@elementMetadata$seqnames), 
+                               as.character(markersPeaks_cell_types@elementMetadata$start),
+                               as.character(markersPeaks_cell_types@elementMetadata$end), sep = "_")
+
+
+
+ct <- c("Progenitor", "Progenitor_brainstem", "Progenitor_isthmic", "Progenitor_anteriorVZ", "Progenitor_VZ", "Progenitor_RL","Progenitor_bipotent", "astroblast_WM", "Progenitor_gliogenic", "astroblast_GCL","astro_parenhymal", "astro_Bergmann","Parabrachial_isthmic_diff","Parabrachial","GABA_DN_diff", "GABA_DN_mature","NTZ_diff","Isthmic_nuclei", "Glut_DN_P_mature", "Glut_DN_V_mature", "MBO", "PC_diff", "PC_mature", "Interneuron_diff", "Interneuron_early", "Interneuron_late", "GCP_prenatal", "GCP_postnatal", "GC_diff_prenatal" ,"GC_diff_P4P7", "GC_diff_P14", "GC_mature_P4P7", "GC_mature_P14", "GC_mature_P63", "UBC_diff", "UBC_mature", "OPC", "Oligodendrocyte", "Microglia", "Vascular", "Apoptotic_GCs", "Low_quality")
+
+top_markers.df <- group_by(markerPeaks.robust.unique, Cell_type) %>%
+        top_n(n = 50, wt = score)
+
+nrow(top_markers.df)
+length(unique(top_markers.df$peak))
+
+top_markers <- unlist(sapply(ct, function(x) top_markers.df$peak[top_markers.df$Cell_type==x]))
+
+mark_stats.plot <- mark_stats[top_markers,ct]
+
+cell_info <- dplyr::select(cell_anno, Cell_type, Cell_type_color, Cell_type_broad, Cell_type_broad_color) %>%
+  unique()
+
+cell_type <- colnames(mark_stats.plot)
+
+cell_type
+
+cell_type_cols <- as.character(sapply(unique(cell_type), function(x) cell_info$Cell_type_color[cell_info$Cell_type==x]))
+names(cell_type_cols) <- unique(cell_type)
+
+cell_type_broad <- as.character(sapply(unique(cell_type), function(x) unique(cell_info$Cell_type_broad[cell_info$Cell_type==x])))
+
+cell_type_broad_cols <- as.character(sapply(unique(cell_type_broad), function(x) unique(cell_info$Cell_type_broad_color[cell_info$Cell_type_broad==x])))
+
+names(cell_type_broad_cols) <- unique(cell_type_broad)
+
+ha = HeatmapAnnotation(cell_type_broad=cell_type_broad,cell_type = cell_type, col=list(cell_type=cell_type_cols, cell_type_broad=cell_type_broad_cols),show_legend = F)
+
+mark_stats.plot[mark_stats.plot < 0] <- 0
+
+draw(Heatmap(matrix = mark_stats.plot,
+        cluster_rows = F,
+        cluster_columns = F,
+        show_row_names = F,
+        show_column_names = T,
+        col=viridis(100,option = "B", direction = 1),
+        border = TRUE,
+        top_annotation = ha,
+        heatmap_legend_param = list(direction = "vertical", title = "Z-score")), heatmap_legend_side = "right")
+```
+
+```{r}
+pdf("~/Mouse_Cereb/Revisions/Figures/010_markerPeaks_byCelltype_logFC3.pdf", width=5, height = 8, useDingbats = F); draw(Heatmap(matrix = mark_stats.plot,
+        cluster_rows = F,
+        cluster_columns = F,
+        show_row_names = F,
+        show_column_names = T,
+        col=viridis(100,option = "B", direction = 1),
+        border = TRUE,
+        top_annotation = ha,
+        heatmap_legend_param = list(direction = "vertical", title = "Z-score")), heatmap_legend_side = "right"); dev.off()
+```
+
+Saving DA peaks
+
+```{r}
+saveRDS(markersPeaks_cell_types, "~/Mouse_Cereb/Revisions/010_markerPeaks_ArchR/marker_peaks.rds")
+saveRDS(markersPeaks_cell_types_se, "~/Mouse_Cereb/Revisions/010_markerPeaks_ArchR/marker_peaks_se_FDR0.01_LogFC_3.rds")
+
+saveRDS(markerPeaks.robust.unique, "~/Mouse_Cereb/Revisions/010_markerPeaks_ArchR/markerPeaks_CellTypeAndState_FDR0.01_LogFC_3_robust_uniq.rds")
+```
+
+
+```{r}
+sessionInfo()
+```
+
+

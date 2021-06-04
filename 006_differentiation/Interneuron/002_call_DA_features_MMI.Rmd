@@ -1,0 +1,426 @@
+---
+title: "Mouse Cerebellum - 002 detect DA features across pseudotime"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(Seurat)
+  library(mpmi)
+  library(mclust)
+})
+```
+
+Now we can proceed with detecting differential accessible features across the pseudotime.
+
+For this we can use mutual information:
+
+```{r}
+#1. Which lineage is to be processed?
+lineage <- "Interneuron"
+#2. Which marker genes to be plotted?
+interesting_genes <- c("Pax2", "Gad1", "Gad2","Cacna2d3","Nhlh1","Kirrel2", "Robo3", "Calb2", "Cnpy1", "Chrm2", "Fabp7", "Sorcs3","Grm8", "March11", "Pvalb", "Lypd6", "Prkcd", "Klhl1", "Lgi2", "Nxph1", "Cdh22","Ptprk", "Slc6a5", "Htra2", "Grm2", "Sst", "Npas3")
+#3. Peak CPM cutoff: 
+peaks_cpm_cutoff <- 5
+#4. Gene score CPM cutoff (unlike peaks, this is scaled to 1e4). On the other hand the feature space is much smaller (x10) so we shouldn't just select something 100 times smaller.
+genes_cpm_cutoff <- 0.5
+```
+
+## Loading data
+
+```{r}
+## Mouse peak info
+mouse_peaks <- read.table("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt", header = T, sep = "\t", stringsAsFactors = F)
+
+## Pseudotime seurat and bins
+atac.seurat <- readRDS(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_atac_seurat.rds"))
+
+pseudotime_bins <- read_tsv(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_pseudotime_stats.txt"))
+
+## Peaks pseudotime bin pseudobulks (cpm)
+peaks_scaled <- read.table(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_pseudotime_bins_peaks_CPM_pseudobulk.txt"), header =  T, sep = "\t", stringsAsFactors = F)
+
+## Gene score pseudotime bin pseudobulks (cpm)
+genes_scaled <- read.table(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_pseudotime_bins_geneScoresScaled_pseudobulk.txt"), header =  T, sep = "\t", stringsAsFactors = F)
+
+## Motif score pseudotime bin pseudobulks (cpm)
+motifs_scaled <- read.table(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_pseudotime_bins_chromVar_deviations_pseudobulk.txt"), header =  T, sep = "\t", stringsAsFactors = F)
+```
+
+```{r}
+DimPlot(atac.seurat, group.by = "timepoint")
+FeaturePlot(atac.seurat, features = "pseudotime")+ scale_color_viridis_c()
+
+DimPlot(atac.seurat, reduction = "umap_harmony", group.by = "timepoint")
+FeaturePlot(atac.seurat, reduction = "umap_harmony", features = "pseudotime")+ scale_color_viridis_c()
+
+VlnPlot(atac.seurat, features = "pseudotime", group.by = "timepoint", pt.size = 0)
+
+hist(atac.seurat$pseudotime, breaks = 100)
+
+table(atac.seurat$pseudotime_bin)
+```
+
+## Mutual information for peaks
+
+```{r}
+## Removing very low counts
+sum(rowSums(peaks_scaled)==0)
+sum(apply(peaks_scaled, 1, IQR)==0)
+
+ggplot(data = NULL, aes(x=log10(rowMeans(peaks_scaled)), y=apply(peaks_scaled, 1, sd)/rowMeans(peaks_scaled))) +
+  geom_hex()
+
+## Will remove all peaks failing to reach the CPM cutoff
+peaks_cpm_cutoff
+
+peaks_scaled <- peaks_scaled[apply(peaks_scaled, 1, max) > peaks_cpm_cutoff,]
+
+sum(apply(peaks_scaled, 1, IQR)==0)
+
+peaks_scaled <- peaks_scaled[apply(peaks_scaled, 1, IQR)!=0,]
+
+dim(peaks_scaled)
+
+## Running mutual information code - How do the accessibility trajectories covary with pseudotime?
+## Here we are using average pseudotime across bins, as pseudotime doesn't progress with uniform speed across bins.
+peaks_sc_mmi <- sapply(1:nrow(peaks_scaled), function(i) {
+  cmi <- cminjk.pw(v1 = sapply(unique(pseudotime_bins$pseudotime_bin), function(x) unique(pseudotime_bins$mean_pseudotime[pseudotime_bins$pseudotime_bin==x])), v2 = t(peaks_scaled[i,]))
+})
+
+names(peaks_sc_mmi) <- row.names(peaks_scaled)
+
+hist(peaks_sc_mmi, breaks = 100)
+```
+
+```{r}
+## Number of permutations
+n_permutations <- 10
+
+peaks_sc_mmi_shuffled_multi <- do.call(cbind,parallel::mclapply(1:n_permutations, function(i) {
+  set.seed(i)
+  peaks_perm <- sample(row.names(peaks_scaled), 10000)
+  ## Shuffling the pseudotime
+  pseudotime_shuffled <- sample(sapply(unique(pseudotime_bins$pseudotime_bin), function(x) unique(pseudotime_bins$mean_pseudotime[pseudotime_bins$pseudotime_bin==x])), length(unique(pseudotime_bins$pseudotime_bin)))
+  ## Calculating mutual information with shuffled pseudotime
+  peaks_sc_mmi_shuffled <-  sapply(1:nrow(peaks_scaled[peaks_perm,]), function(i) {
+  cmi <- cminjk.pw(v1 = pseudotime_shuffled, v2 = t(peaks_scaled[peaks_perm,][i,]))
+})
+},mc.cores = 10))
+```
+
+Putting together all permutation results to generate a null distribution
+
+```{r}
+peaks_sc_mmi_shuffled <- as.numeric(peaks_sc_mmi_shuffled_multi)
+hist(peaks_sc_mmi_shuffled, breaks = 100)
+
+## Calculating p-values for each peak
+peaks_sc_mmi_pvals <- sapply(peaks_sc_mmi, function(x) sum(peaks_sc_mmi_shuffled > x)/length(peaks_sc_mmi_shuffled))
+names(peaks_sc_mmi_pvals) <- names(peaks_sc_mmi)
+hist(peaks_sc_mmi_pvals, breaks = 100)
+
+## Adjusting for multiple testing
+peaks_sc_mmi_padj <- p.adjust(peaks_sc_mmi_pvals, method = "BH")
+names(peaks_sc_mmi_padj) <- names(peaks_sc_mmi)
+hist(peaks_sc_mmi_padj, breaks = 100)
+
+## Suggested cutoff for FDR=1%
+peaks_fdr_cutoff <- unique(round(peaks_sc_mmi[names(peaks_sc_mmi_padj[peaks_sc_mmi_padj==max(peaks_sc_mmi_padj[peaks_sc_mmi_padj < 0.01])])], digits = 3))
+peaks_fdr_cutoff
+## This cutoff is typically too low. Instead we should go for what is suggested by the peaks MMI distribution
+```
+
+Comparing the two distributions.
+
+We typically see that the shuffled distribution is much lower to the true pseudotime so it's better (more useful) if we establish a cutoff using a gaussian mixture model directly on the real MMI values
+
+```{r}
+mod <- mclust::Mclust(peaks_sc_mmi, G = 2)
+plot(mod, what="classification")
+## The cutoff is the maximum value of the group with the lowest MMI score
+mod$classification[1:10]
+
+peaks_mmi_cutoff <- round(min(max(peaks_sc_mmi[mod$classification==1]),max(peaks_sc_mmi[mod$classification==2])), digits = 3)
+
+## Fraction of observations reaching our cutoff (i.e. estimated FDR)
+sum(peaks_sc_mmi_shuffled > peaks_mmi_cutoff)/length(peaks_sc_mmi_shuffled)
+## Or padj for gene marginally passing our cutoff
+peaks_sc_mmi_padj[names(peaks_sc_mmi[peaks_sc_mmi==min(peaks_sc_mmi[peaks_sc_mmi > peaks_mmi_cutoff])])]
+```
+
+Plotting the true vs shuffled distributions with their cutoffs
+
+```{r}
+peaks_mmi_stats <- data.frame(MMI=c(peaks_sc_mmi,peaks_sc_mmi_shuffled), Pseudotime=c(rep("true", length(peaks_sc_mmi)), rep("shuffled", length(peaks_sc_mmi_shuffled))))
+
+p <- ggplot(peaks_mmi_stats, aes(MMI, color=Pseudotime, fill=Pseudotime)) +
+  geom_density(alpha=0.3) +
+  scale_color_manual(values = c("mediumorchid","forestgreen")) +
+  scale_fill_manual(values = c("mediumorchid","forestgreen")) +
+  geom_vline(xintercept = peaks_mmi_cutoff, color="red", lty="dashed") +
+  annotate(geom="text",x=(peaks_mmi_cutoff +0.02), y=4, label=paste0("GMM cutoff: ", peaks_mmi_cutoff), color="red", hjust = 0) +
+  geom_vline(xintercept = peaks_fdr_cutoff, color="orange", lty="dashed") +
+  annotate(geom="text",x=(peaks_fdr_cutoff +0.02), y=3, label=paste0("1% FDR cutoff: ", peaks_fdr_cutoff), color="orange", hjust = 0) +
+  xlab("MMI") +
+  theme_classic()
+
+p
+
+pdf(paste0("~/Mouse_Cereb/Figures/007_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_pseudotime_MMI_cutoff_peaks.pdf"), width = 6, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+Identifying significant peaks
+
+```{r}
+sig_peaks <- names(peaks_sc_mmi[peaks_sc_mmi > max(peaks_mmi_cutoff, peaks_fdr_cutoff)])
+length(sig_peaks)
+length(sig_peaks)/length(peaks_sc_mmi)
+```
+
+## Mutual information for genes
+
+```{r}
+## Removing very low counts
+sum(rowSums(genes_scaled)==0)
+sum(apply(genes_scaled, 1, IQR)==0)
+
+ggplot(data = NULL, aes(x=log10(rowMeans(genes_scaled)), y=apply(genes_scaled, 1, sd)/rowMeans(genes_scaled))) +
+  geom_hex()
+
+## Will remove all genes failing to reach the CPM cutoff
+genes_cpm_cutoff
+
+genes_scaled <- genes_scaled[apply(genes_scaled, 1, max) > genes_cpm_cutoff,]
+
+sum(apply(genes_scaled, 1, IQR)==0)
+
+genes_scaled <- genes_scaled[apply(genes_scaled, 1, IQR)!=0,]
+
+dim(genes_scaled)
+
+## Running mutual information code - How do the accessibility trajectories covary with pseudotime?
+## Here we are using average pseudotime across bins, as pseudotime doesn't progress with uniform speed across bins.
+genes_sc_mmi <- sapply(1:nrow(genes_scaled), function(i) {
+  cmi <- cminjk.pw(v1 = sapply(unique(pseudotime_bins$pseudotime_bin), function(x) unique(pseudotime_bins$mean_pseudotime[pseudotime_bins$pseudotime_bin==x])), v2 = t(genes_scaled[i,]))
+})
+
+names(genes_sc_mmi) <- row.names(genes_scaled)
+
+hist(genes_sc_mmi, breaks = 100)
+```
+
+```{r}
+## Number of permutations
+n_permutations <- 10
+
+genes_sc_mmi_shuffled_multi <- do.call(cbind,parallel::mclapply(1:n_permutations, function(i) {
+  set.seed(i)
+  ## Shuffling the pseudotime
+  pseudotime_shuffled <- sample(sapply(unique(pseudotime_bins$pseudotime_bin), function(x) unique(pseudotime_bins$mean_pseudotime[pseudotime_bins$pseudotime_bin==x])), length(unique(pseudotime_bins$pseudotime_bin)))
+  ## Calculating mutual information with shuffled pseudotime
+  genes_sc_mmi_shuffled <-  sapply(1:nrow(genes_scaled), function(i) {
+  cmi <- cminjk.pw(v1 = pseudotime_shuffled, v2 = t(genes_scaled[i,]))
+})
+},mc.cores = 10))
+```
+
+Putting together all permutation results to generate a null distribution
+
+```{r}
+genes_sc_mmi_shuffled <- as.numeric(genes_sc_mmi_shuffled_multi)
+hist(genes_sc_mmi_shuffled, breaks = 100)
+
+## Calculating p-values for each peak
+genes_sc_mmi_pvals <- sapply(genes_sc_mmi, function(x) sum(genes_sc_mmi_shuffled > x)/length(genes_sc_mmi_shuffled))
+names(genes_sc_mmi_pvals) <- names(genes_sc_mmi)
+hist(genes_sc_mmi_pvals, breaks = 100)
+
+## Adjusting for multiple testing
+genes_sc_mmi_padj <- p.adjust(genes_sc_mmi_pvals, method = "BH")
+names(genes_sc_mmi_padj) <- names(genes_sc_mmi)
+hist(genes_sc_mmi_padj, breaks = 100)
+
+## Suggested cutoff for FDR=1%
+genes_fdr_cutoff <- unique(round(genes_sc_mmi[names(genes_sc_mmi_padj[genes_sc_mmi_padj==max(genes_sc_mmi_padj[genes_sc_mmi_padj < 0.01])])], digits = 3))
+## This cutoff is typically too low. Instead we should go for what is suggested by the genes MMI distribution
+genes_fdr_cutoff
+```
+
+Comparing the two distributions.
+
+We typically see that the shuffled distribution is much lower to the true pseudotime so it's better (more useful) if we establish a cutoff using a gaussian mixture model directly on the real MMI values
+
+```{r}
+mod <- mclust::Mclust(genes_sc_mmi, G = 2)
+plot(mod, what="classification")
+## The cutoff is the maximum value of the group with the lowest MMI score
+mod$classification[1:10]
+
+genes_mmi_cutoff <- round(min(max(genes_sc_mmi[mod$classification==1]),max(genes_sc_mmi[mod$classification==2])), digits = 3)
+
+## Fraction of observations reaching our cutoff (i.e. estimated FDR)
+sum(genes_sc_mmi_shuffled > genes_mmi_cutoff)/length(genes_sc_mmi_shuffled)
+## Or padj for gene marginally passing our cutoff
+genes_sc_mmi_padj[names(genes_sc_mmi[genes_sc_mmi==min(genes_sc_mmi[genes_sc_mmi > genes_mmi_cutoff])])]
+```
+
+Plotting the true vs shuffled distributions with their cutoffs
+
+```{r}
+genes_mmi_stats <- data.frame(MMI=c(genes_sc_mmi,genes_sc_mmi_shuffled), Pseudotime=c(rep("true", length(genes_sc_mmi)), rep("shuffled", length(genes_sc_mmi_shuffled))))
+
+p <- ggplot(genes_mmi_stats, aes(MMI, color=Pseudotime, fill=Pseudotime)) +
+  geom_density(alpha=0.3) +
+  scale_color_manual(values = c("mediumorchid","forestgreen")) +
+  scale_fill_manual(values = c("mediumorchid","forestgreen")) +
+  geom_vline(xintercept = genes_mmi_cutoff, color="red", lty="dashed") +
+  annotate(geom="text",x=(genes_mmi_cutoff +0.02), y=4, label=paste0("GMM cutoff: ", genes_mmi_cutoff), color="red", hjust = 0) +
+    geom_vline(xintercept = genes_fdr_cutoff, color="orange", lty="dashed") +
+  annotate(geom="text",x=(genes_fdr_cutoff +0.02), y=3, label=paste0("1% FDR cutoff: ", genes_fdr_cutoff), color="orange", hjust = 0) +
+  xlab("MMI") +
+  theme_classic()
+
+p
+
+pdf(paste0("~/Mouse_Cereb/Figures/007_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_pseudotime_MMI_cutoff_genes.pdf"), width = 6, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+Identifying significant genes
+
+```{r}
+sig_genes <- names(genes_sc_mmi[genes_sc_mmi > max(genes_mmi_cutoff, genes_fdr_cutoff)])
+length(sig_genes)
+length(sig_genes)/length(genes_sc_mmi)
+```
+
+## Mutual information for motifs
+
+```{r}
+## Removing very low counts
+sum(rowSums(motifs_scaled)==0)
+sum(apply(motifs_scaled, 1, IQR)==0)
+
+## Here we just consider all the motifs as long as their IQR is not zero!
+
+motifs_scaled <- motifs_scaled[apply(motifs_scaled, 1, IQR)!=0,]
+
+dim(motifs_scaled)
+
+## Running mutual information code - How do the accessibility trajectories covary with pseudotime?
+## Here we are using average pseudotime across bins, as pseudotime doesn't progress with uniform speed across bins.
+motifs_sc_mmi <- sapply(1:nrow(motifs_scaled), function(i) {
+  cmi <- cminjk.pw(v1 = sapply(unique(pseudotime_bins$pseudotime_bin), function(x) unique(pseudotime_bins$mean_pseudotime[pseudotime_bins$pseudotime_bin==x])), v2 = t(motifs_scaled[i,]))
+})
+
+names(motifs_sc_mmi) <- row.names(motifs_scaled)
+
+hist(motifs_sc_mmi, breaks = 50)
+```
+
+```{r}
+## Number of permutations
+n_permutations <- 10
+
+motifs_sc_mmi_shuffled_multi <- do.call(cbind,parallel::mclapply(1:n_permutations, function(i) {
+  set.seed(i)
+  ## Shuffling the pseudotime
+  pseudotime_shuffled <- sample(sapply(unique(pseudotime_bins$pseudotime_bin), function(x) unique(pseudotime_bins$mean_pseudotime[pseudotime_bins$pseudotime_bin==x])), length(unique(pseudotime_bins$pseudotime_bin)))
+  ## Calculating mutual information with shuffled pseudotime
+  motifs_sc_mmi_shuffled <-  sapply(1:nrow(motifs_scaled), function(i) {
+  cmi <- cminjk.pw(v1 = pseudotime_shuffled, v2 = t(motifs_scaled[i,]))
+})
+},mc.cores = 10))
+```
+
+Putting together all permutation results to generate a null distribution
+
+```{r}
+motifs_sc_mmi_shuffled <- as.numeric(motifs_sc_mmi_shuffled_multi)
+hist(motifs_sc_mmi_shuffled, breaks = 100)
+
+## Calculating p-values for each peak
+motifs_sc_mmi_pvals <- sapply(motifs_sc_mmi, function(x) sum(motifs_sc_mmi_shuffled > x)/length(motifs_sc_mmi_shuffled))
+names(motifs_sc_mmi_pvals) <- names(motifs_sc_mmi)
+hist(motifs_sc_mmi_pvals, breaks = 100)
+
+## Adjusting for multiple testing
+motifs_sc_mmi_padj <- p.adjust(motifs_sc_mmi_pvals, method = "BH")
+names(motifs_sc_mmi_padj) <- names(motifs_sc_mmi)
+hist(motifs_sc_mmi_padj, breaks = 100)
+
+## Suggested cutoff for FDR=1%
+motifs_fdr_cutoff <- unique(round(motifs_sc_mmi[names(motifs_sc_mmi_padj[motifs_sc_mmi_padj==max(motifs_sc_mmi_padj[motifs_sc_mmi_padj < 0.01])])], digits = 3))
+motifs_fdr_cutoff
+## This cutoff is typically too low. Instead we should go for what is suggested by the motifs MMI distribution
+```
+
+Comparing the two distributions.
+
+Due to the high similarity between motifs of the same family, most motifs appear to be highly significant, thus our GMM model typically fails to split into two distributions.
+
+We will refine our analysis on TFs in differentiation incorporating gene activity estimates (downstream). 
+For now we can plot the two distributions without a cutoff or significance calling (most motifs appear significant anyway).
+
+Plotting the true vs shuffled distributions with their cutoffs
+
+```{r}
+motifs_mmi_stats <- data.frame(MMI=c(motifs_sc_mmi,motifs_sc_mmi_shuffled), Pseudotime=c(rep("true", length(motifs_sc_mmi)), rep("shuffled", length(motifs_sc_mmi_shuffled))))
+
+p <- ggplot(motifs_mmi_stats, aes(MMI, color=Pseudotime, fill=Pseudotime)) +
+  geom_density(alpha=0.3) +
+  scale_color_manual(values = c("mediumorchid","forestgreen")) +
+  scale_fill_manual(values = c("mediumorchid","forestgreen")) +
+      geom_vline(xintercept = motifs_fdr_cutoff, color="orange", lty="dashed") +
+  annotate(geom="text",x=(motifs_fdr_cutoff +0.02), y=3, label=paste0("1% FDR cutoff: ", motifs_fdr_cutoff), color="orange", hjust = 0) +
+  xlab("MMI") +
+  theme_classic()
+
+p
+
+pdf(paste0("~/Mouse_Cereb/Figures/007_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_pseudotime_MMI_distr_motifs.pdf"), width = 6, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+## Export
+
+Let's export these results before proceeding further.
+
+```{r}
+## Peak MMI (with pvals, padj)
+peaks_sc_mmi.df <- data.frame(peak=names(peaks_sc_mmi), mmi=peaks_sc_mmi, pval=peaks_sc_mmi_pvals, padj=peaks_sc_mmi_padj, stringsAsFactors = F)
+
+write_tsv(peaks_sc_mmi.df, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_peaks_pseudotime_MMI.txt"))
+
+## Peaks shuffled
+write.table(peaks_sc_mmi_shuffled_multi, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_peaks_pseudotime_MMI_shuffled.txt"), col.names = T, row.names = T, quote = F, sep = "\t")
+
+## Significant peaks
+write(sig_peaks, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_peaks_pseudotime_MMI_significant.txt"))
+
+## Gene MMI (with pvals, padj)
+genes_sc_mmi.df <- data.frame(gene=names(genes_sc_mmi), mmi=genes_sc_mmi, pval=genes_sc_mmi_pvals, padj=genes_sc_mmi_padj, stringsAsFactors = F)
+
+write_tsv(genes_sc_mmi.df, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_genes_pseudotime_MMI.txt"))
+
+## Genes shuffled
+write.table(genes_sc_mmi_shuffled_multi, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_genes_pseudotime_MMI_shuffled.txt"), col.names = T, row.names = T, quote = F, sep = "\t")
+
+## Significant genes
+write(sig_genes, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_genes_pseudotime_MMI_significant.txt"))
+
+## Motif MMI (with pvals, padj)
+motifs_sc_mmi.df <- data.frame(motif=names(motifs_sc_mmi), mmi=motifs_sc_mmi, pval=motifs_sc_mmi_pvals, padj=motifs_sc_mmi_padj, stringsAsFactors = F)
+
+write_tsv(motifs_sc_mmi.df, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_motifs_pseudotime_MMI.txt"))
+
+## Motifs shuffled
+write.table(motifs_sc_mmi_shuffled_multi, paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_motifs_pseudotime_MMI_shuffled.txt"), col.names = T, row.names = T, quote = F, sep = "\t")
+```
+
+```{r}
+sessionInfo()
+```

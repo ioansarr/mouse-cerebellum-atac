@@ -1,0 +1,171 @@
+---
+title: "Mouse Cerebellum - Benchmarking peaks with external datasets - Cusanovich Cell 2018"
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(Matrix)
+  library(gridExtra)
+})
+```
+
+```{r}
+peaks <- read.table("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt", header = T, sep = "\t", stringsAsFactors = F)
+```
+
+Reading in the raw binary matrix
+
+```{r}
+cusanovich.data <- readRDS("~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/atac_matrix.binary.qc_filtered.rds")
+
+dim(cusanovich.data)
+
+colnames(cusanovich.data)[1:10]
+row.names(cusanovich.data)[1:10]
+```
+
+Reading in their peaks and intersecting with our dataset
+
+```{r, eval=FALSE}
+cusanovich.peaks <- data.frame(peak=row.names(cusanovich.data), stringsAsFactors = F) %>%
+  separate(peak, into = c("chr", "start", "end"), remove = F, sep = "_") %>%
+  mutate(start=as.numeric(start), end=as.numeric(end)) %>%
+  select(chr, start, end, peak)
+
+head(cusanovich.peaks)
+
+table(cusanovich.peaks$chr)
+
+peak_width <- cusanovich.peaks$end - cusanovich.peaks$start
+
+hist(peak_width)
+summary(peak_width)
+```
+
+First, we have to liftover to mm10, as they have used mm9 for their study!!!
+
+```{r, eval=FALSE}
+write.table(cusanovich.peaks, "~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm9.bed", col.names = F, row.names = F, sep = "\t", quote = F)
+```
+
+```{bash, eval=FALSE}
+~/Software/bin/liftOver ~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm9.bed ~/Resources/liftover_chains/mm9ToMm10.over.chain.gz -minMatch=0.9 ~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm10.bed ~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm9_unlifted.bed
+```
+
+Reading in the liftovered files (and replacing the previous object):
+
+```{r}
+cusanovich.peaks <- read_tsv("~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm10.bed", col_names = c("chr", "start", "end", "peak"))
+
+dim(cusanovich.peaks)
+dim(cusanovich.data)
+
+## Subsetting the matrix for the peaks that were successfully liftovered
+cusanovich.data <- cusanovich.data[cusanovich.peaks$peak, ]
+```
+
+Overlapping with our peaks (based on the entire peak width). We will again limit ourselves to the robust peaks.
+
+```{bash}
+bedtools intersect -a ~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_robust.bed -b  ~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/cusanovich_peaks_mm10.bed -wa -wb > ~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/Mouse_Cerebellum_overlapping_cusanovich_peaks.txt
+```
+
+Let's read in the overlaps
+
+X4: Mouse Cerebellum peaks
+X8: Cusanovich peaks
+
+```{r}
+cerebellum_overlapping_cusanovich <- read_tsv("~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/peak_annotation/Mouse_Cerebellum_overlapping_cusanovich_peaks.txt", col_names = F)
+```
+
+First, let's see whether the peaks found in our dataset are more active in cerebellum (and other brain cell types). 
+
+For that we also need to read in the metadata for the barcodes:
+
+```{r}
+cusanovich_metadata <- read_tsv("~/Mouse_Cereb/006_peaks/002_external_data/Cusanovich_Cell_2018/cell_metadata.txt")
+
+dim(cusanovich_metadata)
+head(cusanovich_metadata)
+table(cusanovich_metadata$tissue)
+table(cusanovich_metadata$cell_label)
+```
+
+For each cell type and tissue, we can calculate a relative enrichment score of the peaks found in our annotation versus all peaks (counts_peaks_overlap/counts_peaks).
+
+```{r}
+inOurPeaks <- unique(cerebellum_overlapping_cusanovich$X8)
+
+peak_enrichment <- data.frame(cell=colnames(cusanovich.data),
+                              total=Matrix::colSums(cusanovich.data),
+                              inOur=Matrix::colSums(cusanovich.data[inOurPeaks,]),
+                              stringsAsFactors = F)
+
+peak_enrichment$cer_enrichment <- peak_enrichment$inOur / peak_enrichment$total
+
+peak_enrichment <- left_join(cusanovich_metadata, peak_enrichment)
+```
+
+```{r}
+## Order to plot tissues
+tissue_order <- group_by(peak_enrichment, tissue) %>%
+  summarise(cer_enr_med=median(cer_enrichment)) %>%
+  arrange(desc(cer_enr_med))
+
+peak_enrichment$tissue <- factor(peak_enrichment$tissue, tissue_order$tissue)
+
+p <- ggplot(peak_enrichment, aes(x=tissue, y=cer_enrichment, fill=tissue)) +
+  geom_violin() +
+  geom_boxplot(width=0.1, outlier.alpha = 0) +
+  theme_classic() +
+  ylab("Fraction of counts in cerebellum peaks") +
+  xlab("Tissue (Cusanovich 2018)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust = 0.95), legend.position = "none")
+
+p
+
+pdf("~/Mouse_Cereb/Figures/003_peakAnnotation/Cusanovich_FractionOfReads_inCerebellumRobustPeaks_byTissue.pdf", width = 5, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+Same for cell types:
+
+```{r}
+cell_label_order <- group_by(peak_enrichment, cell_label) %>%
+  summarise(cer_enr_med=median(cer_enrichment)) %>%
+  arrange(desc(cer_enr_med))
+
+peak_enrichment$cell_label <- factor(peak_enrichment$cell_label, cell_label_order$cell_label)
+
+ggplot(peak_enrichment, aes(x=cell_label, y=cer_enrichment, fill=cell_label)) +
+  geom_violin() +
+  geom_boxplot(width=0.1, outlier.alpha = 0) +
+  theme_classic() +
+  ylab("Fraction of counts in cerebellum peaks") +
+  xlab("Cell type (Cusanovich 2018)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust = 0.95), legend.position = "none")
+
+
+## Only plotting top-10 and bottom-10 cell types
+p <- ggplot(filter(peak_enrichment, cell_label %in% cell_label_order$cell_label[c(1:10, (nrow(cell_label_order)-9): nrow(cell_label_order))]), aes(x=cell_label, y=cer_enrichment, fill=cell_label)) +
+  geom_violin() +
+  geom_boxplot(width=0.1, outlier.alpha = 0) +
+  theme_classic() +
+  geom_vline(xintercept = 10.5, color="indianred", lty="dashed") +
+  ylab("Fraction of counts in cerebellum peaks") +
+  xlab("Cell type (Cusanovich 2018)") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.95, vjust = 0.95), legend.position = "none")
+
+p
+
+pdf("~/Mouse_Cereb/Figures/003_peakAnnotation/Cusanovich_FractionOfReads_inCerebellumRobustPeaks_byCellType.pdf", width = 5, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+
+```{r}
+sessionInfo()
+```
+

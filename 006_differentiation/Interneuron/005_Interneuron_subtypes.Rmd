@@ -1,0 +1,89 @@
+---
+title: "Mouse cerebellum - Interneuron subtypes"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(viridis)
+  library(Seurat)
+  library(SummarizedExperiment)
+  library(Matrix)
+  library(irlba)
+  library(RColorBrewer)
+})
+```
+
+```{r}
+lineage <- "Interneuron"
+
+atac.seurat <- readRDS(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_lineage_atac_seurat.rds"))
+
+DimPlot(atac.seurat, reduction = "umap_harmony", group.by = "clusters_harmony", label = T)
+DimPlot(atac.seurat, reduction = "umap_harmony", group.by = "timepoint", label = T)
+
+
+atac.seurat <- FindClusters(atac.seurat, resolution = 0.9, reduction = "harmony")
+
+DimPlot(atac.seurat, reduction = "umap_harmony", label = T)
+DimPlot(atac.seurat, reduction = "umap_harmony", group.by = "timepoint", label = T)
+
+atac.seurat$clusters_harmony_0.9 <- as.character(atac.seurat$seurat_clusters)
+atac.seurat@assays$GeneScoreScaled@data <- as.matrix(atac.seurat@assays$GeneScoreScaled@data)
+```
+
+```{r}
+interesting_genes <- c("Pax2", "Gad1", "Gad2","Cacna2d3","Nhlh1","Kirrel2", "Robo3", "Calb2", "Cnpy1", "Chrm2", "Fabp7", "Sorcs3","Grm8", "March11", "Pvalb", "Lypd6", "Prkcd", "Klhl1", "Lgi2", "Nxph1", "Cdh22","Ptprk", "Slc6a5", "Htra2", "Grm2", "Sst", "Npas3")
+
+plotMarkers_harmony <- function(gene, obj=atac.seurat) {
+  ggplot(NULL, aes(x=obj@reductions$umap_harmony@cell.embeddings[,1],
+                 y=obj@reductions$umap_harmony@cell.embeddings[,2],
+                 col=log10(obj@assays$GeneScoreScaled@data[gene,]))) +
+  geom_point(size=0.1) +
+  scale_colour_viridis_c(na.value = "gray90", option = "magma", direction = 1, name="log10 CPM") +
+  xlab("UMAP1") +
+  ylab("UMAP2") +
+  ggtitle(paste0("GeneScore_", gene))+
+  theme_classic()
+}
+
+lapply(interesting_genes, plotMarkers_harmony)
+```
+
+Finding marker genes for each terminally differentiated cluster (i.e. those corresponding to the subtypes)
+
+```{r}
+dif_clust <- c("12","9","5","4", "16", "0", "7", "15","8", "13")
+
+dif_markers <- Reduce(bind_rows,lapply(dif_clust, function(x) {
+  markers_x <- FindMarkers(atac.seurat, ident.1=x,
+                         subset.ident = dif_clust, 
+                         group.by = "clusters_harmony_0.9",
+                         only.pos = T,
+                         assay = "GeneScoreScaled")
+  if(nrow(markers_x) > 0) {
+    markers_x$gene <- row.names(markers_x)
+    markers_x$clust <- x
+    markers_x <- filter(markers_x, p_val_adj < 0.05)
+    return(markers_x)
+  } else {
+    return(NULL)
+  }
+}))
+```
+
+```{r}
+saveRDS(atac.seurat, "~/Mouse_Cereb/015_withinLineages/Interneuron/Mouse_withinInterneuron_lineage_atac_seurat_subtypes_res0.9.rds")
+saveRDS(dif_markers, "~/Mouse_Cereb/015_withinLineages/Interneuron/Mouse_withinInterneuron_lineage_atac_seurat_subtypes_res0.9_markersGS.rds")
+```
+
+
+```{r}
+sessionInfo()
+```
+
+

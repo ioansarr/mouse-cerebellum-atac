@@ -1,0 +1,94 @@
+---
+title: "ArchR_003_peak_calling"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(ArchR)
+  library(tidyverse)
+  library(RColorBrewer)
+})
+```
+
+```{r}
+addArchRThreads(threads = 40) 
+
+## Working directory. This is where the arrow files will be generated and stored.
+setwd("~/Opo_Cereb/")
+
+proj <- loadArchRProject("~/Opo_Cereb/proj2_finalCells/")
+saveArchRProject(proj, "proj3_peaks")
+proj <- loadArchRProject("~/Opo_Cereb/proj3_peaks")
+```
+
+```{r, fig.width=8, fig.height=8}
+p1 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Sample_short", embedding = "UMAP_finalNucSet", pal = colorRampPalette(brewer.pal(11, "Spectral"))(length(unique(proj$Sample_short))), rastr = T, labelMeans = T)
+p2 <- plotEmbedding(ArchRProj = proj, colorBy = "cellColData", name = "Clusters_finalNucSet_res1.0", embedding = "UMAP_finalNucSet", rastr = T)
+
+ggAlignPlots(p1, p2, type = "h")
+```
+
+```{r}
+sort(table(proj$Clusters_finalNucSet_res1.0), decreasing = T)
+```
+
+Creating pseudobulk replicates and identifying peaks:
+
+```{r}
+proj <- addGroupCoverages(
+  ArchRProj = proj,
+  minCells = 50, ## minimum number of cells per replicate -> thus minimum number of cells per group will be 2 reps x 100 cells = 100 cells!
+  maxCells = 200, ## maximum number of cells per replicate
+  maxFragments = 5e6, ## maximum number of fragments per cell group
+  minReplicates = 2, ## minimum number of replicates per group
+  maxReplicates = 5, ## maximum number of replicates per group
+  sampleRatio = 0.8, ## fraction of cells that can be sampled from a replicate to contribute to other replicates (without replacement) -> this will only affect our three clusters with less than 100 cells!
+  returnGroups = F,
+  force = T,
+  groupBy = "Clusters_finalNucSet_res1.0"
+)
+```
+
+Now calling peaks:
+
+```{r}
+pathToMacs2 <- "/home/ioansarr/Software/miniconda3/envs/atac_27/bin/macs2"
+
+proj <- addReproduciblePeakSet(
+    ArchRProj = proj, 
+    groupBy = "Clusters_finalNucSet_res1.0", 
+    pathToMacs2 = pathToMacs2,
+    reproducibility = "2", 
+    peaksPerCell = 1000,
+    maxPeaks = 200000,
+    minCells = 40,
+    excludeChr = c("chrY", "chrM"), 
+    method = "q",
+    cutOff = 0.01, 
+    genomeSize = 3.5e9,
+    extendSummits = 250,
+    force = T
+)
+```
+
+Adding the peak matrix
+
+```{r}
+proj <- addPeakMatrix(proj,
+                      ceiling = 5,
+                      binarize = F,
+                      force = T)
+```
+
+
+```{r}
+saveArchRProject(proj)
+```
+
+```{r}
+sessionInfo()
+```
+

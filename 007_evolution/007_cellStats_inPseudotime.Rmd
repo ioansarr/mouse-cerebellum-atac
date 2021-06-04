@@ -1,0 +1,115 @@
+---
+title: "Mouse Cerebellum - Cell stats across GC pseudotime"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(RColorBrewer)
+  library(viridis)
+})
+```
+
+Cell stats in pseudotime
+
+```{r}
+lineage <- "GC"
+
+pseudotime_bins <- read_tsv(paste0("~/Mouse_Cereb/015_withinLineages/", lineage, "/Mouse_within", lineage, "_pseudotime_stats.txt"))
+
+pseudotime_bins$pseudotime_bin_broad <- cut(x = pseudotime_bins$pseudotime, breaks = seq(0,1, by = 0.05),include.lowest = T, labels = F)
+
+cell_stats <- readRDS("~/Mouse_Cereb/Revisions/007_conservation_backgroundDist/Mouse_Cerebellum_cellStats_byPeaks_distOnly.rds")
+
+cell_stats <- left_join(pseudotime_bins, cell_stats)
+```
+
+```{r}
+cell_stats$sample <- paste(cell_stats$pseudotime_bin_broad, cell_stats$timepoint, sep = "_")
+
+cell_stats_sum <- filter(cell_stats, is.na(pseudotime)==F) %>%
+  group_by(sample, timepoint, pseudotime_bin_broad, orig.ident) %>%
+  summarise(
+    ## Phastons in distal CREs (vertebrates)
+    mean_phastcons_dist=mean(mean_phastcons_dist),
+    mean_age_dist=mean(mean_Age_dist),
+    mean_pseudotime=mean(pseudotime),
+    ## Number of cells in each bin
+    count=n()) %>%
+  ungroup() %>%
+  group_by(timepoint, pseudotime_bin_broad) %>%
+  summarise(
+    phastcons_dist_ci_up=max(mean_phastcons_dist),
+    phastcons_dist_ci_mean=mean(mean_phastcons_dist),
+    phastcons_dist_ci_low=min(mean_phastcons_dist),
+    
+    age_dist_ci_up=max(mean_age_dist),
+    age_dist_ci_mean=mean(mean_age_dist),
+    age_dist_ci_low=min(mean_age_dist),
+    
+    pseudotime_ci_up=max(mean_pseudotime),
+    pseudotime_ci_mean=mean(mean_pseudotime),
+    pseudotime_ci_low=min(mean_pseudotime),
+    count=sum(count)
+  )
+
+p <- ggplot(filter(cell_stats_sum, count >=40), aes(x=pseudotime_bin_broad, y=phastcons_dist_ci_mean, color=timepoint)) +
+  geom_pointrange(aes(ymin=phastcons_dist_ci_low, ymax=phastcons_dist_ci_up)) +
+  geom_line() +
+  scale_x_continuous(breaks = 1:20) +
+  scale_color_brewer(palette = "Spectral")+
+  theme_classic() +
+  ylab("PhastCons vertebrates (intergenic CREs)")
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/007_Mouse_cerebellum_GC_phastCons_by_DevAndPseudotime.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+
+p <- ggplot(filter(cell_stats_sum, count >=40), aes(x=pseudotime_bin_broad, y=age_dist_ci_mean, color=timepoint)) +
+  geom_pointrange(aes(ymin=age_dist_ci_low, ymax=age_dist_ci_up)) +
+  geom_line() +
+  scale_x_continuous(breaks = 1:20) +
+  scale_color_brewer(palette = "Spectral")+
+  theme_classic() +
+  ylab("Average minimum age (intergenic CREs)")
+
+p
+
+pdf("~/Mouse_Cereb/Revisions/Figures/007_Mouse_cerebellum_GC_minAge_by_DevAndPseudotime.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+
+p <- ggplot(filter(cell_stats_sum, count >=40), aes(x=pseudotime_bin_broad, y=pseudotime_ci_mean, color=timepoint)) +
+  geom_pointrange(aes(ymin=pseudotime_ci_low, ymax=pseudotime_ci_up)) +
+  geom_line() +
+  scale_x_continuous(breaks = 1:20) +
+  scale_color_brewer(palette = "Spectral")+
+  #scale_y_continuous(breaks = seq(0.4, 0.6, by = 0.02)) +
+  theme_classic() +
+  ylab("Pseudotime across bins")
+
+pdf("~/Mouse_Cereb/Revisions/Figures/007_Mouse_cerebellum_GC_pseudotime_by_DevAndPseudotime.pdf", width = 6, height = 4, useDingbats = F); print(p); dev.off()
+```
+
+```{r}
+cell_stats <- filter(cell_stats, is.na(pseudotime)==F)
+
+m_full <- lm(mean_phastcons_dist ~ pseudotime + as.numeric(factor(timepoint)), data = cell_stats[is.na(cell_stats$pseudotime)==F,])
+
+m_pseudo_only <- lm(mean_phastcons_dist ~ pseudotime, data = cell_stats[is.na(cell_stats$pseudotime)==F,])
+
+m_dev_only <- lm(mean_phastcons_dist ~ as.numeric(factor(timepoint)), data = cell_stats[is.na(cell_stats$pseudotime)==F,])
+
+anova(m_full, m_pseudo_only)
+anova(m_full, m_dev_only)
+
+coefficients(summary(m_full))
+```
+
+
+```{r}
+sessionInfo()
+```
+

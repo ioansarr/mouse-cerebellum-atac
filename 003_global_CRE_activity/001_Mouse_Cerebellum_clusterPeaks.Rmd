@@ -1,0 +1,348 @@
+---
+title: "Mouse Cerebellum - Calling global CRE clusters"
+author: "Ioannis Sarropoulos"
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+output: html_document
+---
+
+```{r}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(data.table)
+  library(Matrix)
+  library(cluster)
+  library(viridis)
+  library(gridExtra)
+  library(RColorBrewer)
+  library(ComplexHeatmap)
+  library(SummarizedExperiment)
+})
+```
+
+##1. Preparing the input: CPM and standardising
+
+```{r}
+peak_mat <- readRDS("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peak_matrix_SE_withInfo_robustPeaks.rds")
+
+cell_anno <- readRDS("~/Mouse_Cereb/004_cellTypes_broad/Mouse_Cerebellum_atac_finalCellType_annotation.rds")
+
+## Mouse peak info
+mouse_peaks <- read.table("~/Mouse_Cereb/006_peaks/Mouse_Cerebellum_reproducible_peaks_summary.txt", header = T, sep = "\t", stringsAsFactors = F)
+```
+
+Here we will consider separately each lineage and timepoint. Let's make a list of all our comparisons
+
+```{r}
+## Determining how many cells we have for each pseudobulk
+cell_counts <- group_by(cell_anno, Cell_type_broad, Timepoint) %>%
+  ## Keeping only major lineages
+  filter(!(Cell_type_broad %in% c("Parabrachial+Isthmic_nuclei", "Glut_DN+Isthmic_nuclei", "Other"))) %>%
+  dplyr::count() %>%
+  mutate(sample=paste(Cell_type_broad, Timepoint, sep = "_"))
+
+## Number of pseudobulk samples
+nrow(cell_counts)
+
+## Number of cells per pseudobulk
+hist(log10(cell_counts$n), breaks = 50)
+
+## Pseudobulks with at least 50 cells
+sum(cell_counts$n >= 50)
+
+cell_counts$sample[cell_counts$n >= 50]
+
+## Pseudobulks to do:
+cell_counts.filtered <- filter(cell_counts, n >=50)
+
+print(cell_counts.filtered$sample)
+```
+
+Now aggregating counts in each pseudobulk. We will limit ourselves to robust peaks only!
+
+```{r}
+pseudobulks <- do.call(cbind, parallel::mclapply(1:nrow(cell_counts.filtered), function(i){
+  cells <- cell_anno$cell[cell_anno$Cell_type_broad==cell_counts.filtered$Cell_type_broad[i] & cell_anno$Timepoint == cell_counts.filtered$Timepoint[i]]
+  pseudo <- Matrix::rowSums(assay(peak_mat[, cells]))
+  return(pseudo)
+}, mc.cores = 10))
+
+dim(pseudobulks)
+colnames(pseudobulks) <- unique(cell_counts.filtered$sample)
+row.names(pseudobulks) <- peak_mat@elementMetadata$peak
+
+## Calculating CPM values per sample
+pseudobulks <- t(t(pseudobulks)/colSums(pseudobulks) * 1e6)
+
+write.table(pseudobulks, "~/Mouse_Cereb/013_globalCREactivity/Mouse_lineage_by_timepoint_pseudobulk_cpm.txt", row.names = T, col.names = T, quote = F, sep = "\t")
+```
+
+```{r}
+sort(colSums(pseudobulks))
+
+hist(log10(rowSums(pseudobulks)))
+
+max_cpm <- apply(pseudobulks, 1, max)
+hist(log10(max_cpm))
+```
+
+Standardising: fraction of max cpm value
+
+```{r}
+pseudobulks.std <- pseudobulks/max_cpm
+
+pseudobulks.std[1:5, 1:5]
+
+## Rounding to the third digit to ease off subsequent calculations
+pseudobulks.std <- round(pseudobulks.std, digits = 3)
+pseudobulks.std[1:5, 1:5]
+
+write.table(pseudobulks.std, "~/Mouse_Cereb/013_globalCREactivity/Mouse_lineage_by_timepoint_pseudobulk_cpm_std.txt", row.names = T, col.names = T, quote = F, sep = "\t")
+```
+
+##2. Clustering round 1: k-means
+
+Optimising k based on a subsample of peaks
+
+```{r, eval=FALSE}
+ks <- c(5, 10:30, 35, 40, 50, 60, 70)
+length(ks)
+
+clust_opt <- Reduce(bind_rows,lapply(1:10, function(s){
+  set.seed(s)
+  i <- sample(1:nrow(pseudobulks.std), 20000)
+  x <- do.call(rbind,lapply(ks, function(k){
+    cl <- kmeans(pseudobulks.std[i,], centers = k, nstart = 25, iter.max = 100)
+    wws <- cl$tot.withinss
+    ss <- silhouette(cl$cluster, as.dist(1-cor(t(pseudobulks.std[i,]))))
+    return(c(k,wws, mean(ss[,3])))
+  }))
+  x <- as.data.frame(x)
+  colnames(x) <- c("k", "wws", "sil")
+  x$seed <- s
+  return(x)
+}))
+
+write_tsv(clust_opt, "~/Mouse_Cereb/013_globalCREactivity/peak_kmeans_optimising_k.txt")
+```
+
+```{r}
+clust_opt <- read_tsv("~/Mouse_Cereb/013_globalCREactivity/peak_kmeans_optimising_k.txt")
+
+ggplot(clust_opt, aes(x=k, y=wws, color=as.factor(seed))) +
+  geom_point() +
+  geom_line() +
+  theme_classic()
+
+ggplot(clust_opt, aes(x=k, y=sil, color=as.factor(seed))) +
+  geom_point() +
+  geom_line() +
+  theme_classic()
+
+ggplot(filter(clust_opt, k%in% 10:40), aes(x=k, y=sil, color=as.factor(seed))) +
+  geom_point() +
+  geom_line() +
+  theme_classic()
+
+ggplot(filter(clust_opt, k%in% 10:40), aes(x=k, y=wws, color=as.factor(seed))) +
+  geom_point() +
+  geom_line() +
+  theme_classic()
+```
+
+We have seen that directly going for the optimal number of clusters (~30) with k-means clustering doesn't lead to optimal splits based on biological relevance.
+
+Instead, we will go for the approach suggested by Trevino et al. Science 2020:
+We will generate a larger number of k-clusters (here 50), then merge them back using hierarchical clustering on the cluster centers.
+
+```{r, eval=FALSE}
+set.seed(1)
+prim_clust <- kmeans(pseudobulks.std, centers = 50, nstart = 50, iter.max = 200)
+
+saveRDS(prim_clust, "~/Mouse_Cereb/013_globalCREactivity/Mouse_peaks_lineage_by_t_PrimaryClusters_k50_obj.rds")
+
+table(prim_clust$cluster)
+```
+
+Let's visualise these primary clusters with 20,000 random peaks
+
+```{r, fig.height=12, fig.width=8}
+prim_clust <- readRDS("~/Mouse_Cereb/013_globalCREactivity/Mouse_peaks_lineage_by_t_PrimaryClusters_k50_obj.rds")
+
+peaks2plot <- sample(row.names(pseudobulks.std), 20000)
+
+draw(Heatmap(matrix = pseudobulks.std[peaks2plot,],
+        row_split =prim_clust$cluster[peaks2plot] ,
+        cluster_rows = F,
+        cluster_columns = F,
+        show_row_names = F,
+        col=viridis(100,option = "A"),
+        cluster_row_slices=T,
+        border = TRUE,
+        heatmap_legend_param = list(direction = "horizontal", title = "Scaled activity")), heatmap_legend_side = "top")
+```
+
+##3. Clustering round 2: Refining clusters with hierarchical clustering of their centers
+
+```{r, fig.height=5, fig.width=6}
+## Visualising the clustering of the cluster centers
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 16)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 17)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 18)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 19)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 20)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 21)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 22)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 23)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 24)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 25)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 26)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 27)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 28)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 29)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 30)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 31)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 32)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 33)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 34)
+pheatmap::pheatmap(prim_clust$centers, cluster_cols = F,clustering_distance_rows = "correlation", cutree_rows = 35)
+```
+
+Based on our biological intuition, the optimal number of clusters to merge into seems to be 26.
+
+Let's see what the silhouette scores tell us:
+
+```{r, eval=FALSE}
+## Now generating the actual hierarchical clustering object
+h <- hclust(as.dist(1-cor(t(prim_clust$centers), use = "pairwise.complete.obs", method = "pearson")))
+plot(h)
+
+## Calculating the silhouette score
+## This can get quite heavy computationally, so we will sample 10,000 peaks
+## For a more precise estimate later, we can repeat the sampling a few times with different seeds.
+set.seed(1)
+random_peaks <- sample(row.names(pseudobulks.std), 10000)
+
+sil <- sapply(10:40, function(i) {
+  ## Cutting the tree
+  clust_merge <- cutree(h, k = i)
+  ## Updating the cluster
+  clust_new <- sapply(prim_clust$cluster, function(x) clust_merge[which(names(clust_merge)==x)])
+  ## A suffix has been added to the names. Need to clear this out
+  names(clust_new) <- gsub("\\.[0-9]*", "", names(clust_new))
+  ## Computing the silhouette
+  sil <- mean(silhouette(clust_new[random_peaks], as.dist(1-cor(t(pseudobulks.std[random_peaks,]))))[,3])
+  return(sil)
+})
+
+plot(10:40, sil)
+
+names(sil) <- paste0("k", 10:40)
+```
+
+Exporting the hclust object and the silhouetes for the different cuts of the tree
+
+```{r, eval=FALSE}
+saveRDS(list(h=h, sil=sil), "~/Mouse_Cereb/013_globalCREactivity/Mouse_peaks_lineage_by_t_PrimaryClusters_k40_merge_by_hclust.rds")
+```
+
+```{r}
+x <- readRDS("~/Mouse_Cereb/013_globalCREactivity/Mouse_peaks_lineage_by_t_PrimaryClusters_k40_merge_by_hclust.rds")
+h <- x[["h"]]
+sil <- x[["sil"]]
+
+plot(10:40, sil)
+```
+
+Not so informative. Let's go with 26 clusters, which seemed to be the most reasonable number based on the hclust analysis of the cluster means.
+
+Merging the clusters
+
+```{r}
+final_k <- 26
+
+clust_merge <- cutree(h, final_k)
+clust_new <- sapply(prim_clust$cluster, function(x) clust_merge[which(names(clust_merge)==x)])
+names(clust_new) <- gsub("\\.[0-9]*", "", names(clust_new))
+
+# Exporting the clustering result
+saveRDS(clust_new, "~/Mouse_Cereb/013_globalCREactivity/Mouse_peaks_lineage_by_t_FinalClusters.rds")
+```
+
+```{r, fig.height=12, fig.width=8}
+clust_new <- readRDS("~/Mouse_Cereb/013_globalCREactivity/Mouse_peaks_lineage_by_t_FinalClusters.rds")
+
+draw(Heatmap(matrix = pseudobulks.std[peaks2plot,],
+        row_split =clust_new[peaks2plot] ,
+        cluster_rows = F,
+        cluster_columns = F,
+        show_row_names = F,
+        col=colorRampPalette(brewer.pal(n=10,name = "GnBu"))(100),
+        cluster_row_slices=T,
+        border = TRUE,
+        heatmap_legend_param = list(direction = "horizontal", title = "Scaled activity")), heatmap_legend_side = "top")
+```
+
+##4. Cluster membership: Correlation with centers
+
+We see that not all peaks are equally close to the cluster center. To estimate the confidence of the membership for each peak to its cluster, we can calculate correlation scores across peak profiles and the centers
+
+```{r}
+cluster_centers <- do.call(cbind,lapply(sort(unique(clust_new)), function(c) {
+  colMeans(pseudobulks.std[names(clust_new[clust_new==c]),])
+}))
+
+colnames(cluster_centers) <- sort(unique(clust_new))
+
+all_cor <- cor(t(pseudobulks.std), cluster_centers)
+```
+
+Adding the peak and cluster information and plotting the correlation distributions per cluster.
+
+```{r, fig.height=14, fig.width=14}
+all_cor_df <- as.data.frame(all_cor)
+all_cor_df$peak <- row.names(all_cor_df)
+all_cor_df$clust <- factor(as.character(clust_new), levels = as.character(1:ncol(all_cor_df)))
+
+grid.arrange(grobs=lapply(as.character(1:ncol(all_cor)), function(clust) {
+  ggplot(data = NULL, aes(x=all_cor_df$clust, y=all_cor_df[, clust], fill=all_cor_df$clust)) +
+  geom_violin()+
+  ylab(paste0("Correlation to cluster: ", clust)) +
+  xlab("Cluster") +
+  theme(legend.position = "none")
+}), ncol=4)
+```
+
+The difference in the distribution makes sense as some clusters are more distinct than others.
+
+However, we can generally call "high-confidence" memberships those with a correlation above 0.5.
+
+Let's collect the following information per peak:
+1. Assigned cluster
+2. Correlation to assigned cluster
+3. Mean correlation to all clusters
+
+```{r}
+clust_sum <- do.call(rbind,parallel::mclapply(1:nrow(all_cor_df), function(i) {
+  clust_corr <- all_cor_df[i, colnames(all_cor_df) == all_cor_df$clust[i]]
+  return(c(peak=all_cor_df$peak[i],
+              lin_clust=all_cor_df$clust[i],
+              lin_clust_corr=clust_corr,
+              mean_all_clust_corr=mean(as.numeric(all_cor_df[i, colnames(all_cor_df) %in% unique(all_cor_df$clust)]))))
+  },mc.cores = 10))
+
+clust_sum <- as.data.frame(clust_sum, stringsAsFactors=F)
+clust_sum$lin_clust_corr <- as.numeric(clust_sum$lin_clust_corr)
+clust_sum$mean_all_clust_corr <- as.numeric(clust_sum$mean_all_clust_corr)
+
+head(clust_sum)
+```
+
+Now we can save this summary as well
+
+```{r}
+write_tsv(clust_sum, "~/Mouse_Cereb/013_globalCREactivity/Mouse_peaks_lineage_by_t_FinalClusters_withCorr.txt")
+```
+
+```{r}
+sessionInfo()
+```
