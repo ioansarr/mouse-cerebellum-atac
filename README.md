@@ -1,7 +1,7 @@
 # Mouse developing cerebellum snATAC-seq atlas
 
-This repository contains code used in the analysis of the manuscript: "Developmental and evolutionary dynamics of cis-regulatory elements in mouse cerebellar cells". 
-This is an updated version of the preprint "The regulatory landscape of cells in the developing mouse cerebellum" https://doi.org/10.1101/2021.01.29.428632.
+This repository contains code used in the analysis of the manuscript: "Developmental and evolutionary dynamics of cis-regulatory elements in mouse cerebellar cells" https://doi.org/10.1126/science.abg4696. 
+This is the peer-reviewed version of the preprint "The regulatory landscape of cells in the developing mouse cerebellum" https://doi.org/10.1101/2021.01.29.428632.
 
 Some analyses have been updated as part of the peer review process. You can still access the original code used for the biorxiv version in the branch "biorxiv_v1". However, we highly recommend using the updated scripts as these contain substantial updates compared to the original version.
 
